@@ -3,28 +3,44 @@ from pathlib import Path
 
 import pandas as pd
 
-from PySide6.QtCore import Qt, QDir, QDateTime
+from PySide6.QtCore import Qt, QDir, QDateTime, QPoint, QPointF, QRect, QRectF, QMargins
+from PySide6.QtGui import QPainter, QColor, QPen, QCursor, QBrush
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
     QTreeView, QFileSystemModel, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QPushButton, QStackedWidget,
     QDateTimeEdit, QDoubleSpinBox, QMessageBox, QCheckBox,
     QDialog, QDialogButtonBox, QFormLayout, QListWidget, QListWidgetItem,
-    QAbstractItemView, QGridLayout
+    QAbstractItemView, QGridLayout, QToolTip, QRubberBand
 )
 
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-from matplotlib.patches import FancyBboxPatch
-import matplotlib.dates as mdates
+from PySide6.QtCharts import (
+    QChart, QChartView, QLineSeries, QScatterSeries,
+    QValueAxis, QDateTimeAxis
+)
+from PySide6.QtWidgets import QGraphicsLineItem, QGraphicsRectItem, QGraphicsEllipseItem
 
-from utils.logger import logger
+# -----------------------------
+# logger fallback
+# -----------------------------
+try:
+    from utils.logger import logger  # type: ignore
+except Exception:
+    class _Dummy:
+        def info(self, *a, **k): print(*a)
+        def debug(self, *a, **k): print(*a)
+        def error(self, *a, **k): print(*a)
+        def exception(self, *a, **k): print(*a)
+    logger = _Dummy()
 
 NONE_ITEM = "(None)"
 
 
+# =========================================================
+# Dialogs
+# =========================================================
 class YScaleDialog(QDialog):
-    """Left/Right Y 축 스케일 설정 다이얼로그 (Auto/Manual + Min/Max + Linear/Log)."""
+    """Left/Right Y 축 스케일 설정 다이얼로그 (Auto/Manual + Min/Max). Log UI는 유지하지만 적용 안함."""
 
     def __init__(self, title: str, mode: str, ymin: float, ymax: float, is_log: bool, parent=None):
         super().__init__(parent)
@@ -50,7 +66,7 @@ class YScaleDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Mode", self.mode_cb)
-        form.addRow("Scale", self.log_cb)
+        form.addRow("Scale", self.log_cb)  # UI만(미적용)
         form.addRow("Min", self.ymin_sb)
         form.addRow("Max", self.ymax_sb)
 
@@ -75,7 +91,7 @@ class YScaleDialog(QDialog):
             self.mode_cb.currentText(),
             float(self.ymin_sb.value()),
             float(self.ymax_sb.value()),
-            self.log_cb.currentText() == "Log",
+            self.log_cb.currentText() == "Log",  # UI만
         )
 
 
@@ -140,7 +156,7 @@ class XRangeDialog(QDialog):
 
 
 class YColumnsDialog(QDialog):
-    """Y 축에 그릴 컬럼을 최대 3개까지 선택하는 다이얼로그."""
+    """Y 축에 그릴 컬럼을 최대 3개까지 선택."""
 
     def __init__(self, title: str, items: list[str], selected: list[str], parent=None):
         super().__init__(parent)
@@ -178,16 +194,286 @@ class YColumnsDialog(QDialog):
         return [i.text() for i in self.listw.selectedItems()]
 
 
-class PlotArea:
-    """한 개의 그래프(figure+canvas)와 상태를 묶어서 관리."""
+# =========================================================
+# TitleBar: 타이틀 클릭(좌/우) + 버튼(직관 UI)
+# =========================================================
+class TitleBar(QWidget):
+    def __init__(self, on_pick_left, on_pick_right, parent=None):
+        super().__init__(parent)
+        self._on_pick_left = on_pick_left
+        self._on_pick_right = on_pick_right
 
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 4)
+        lay.setSpacing(8)
+
+        self.lbl = QLabel("—")
+        self.lbl.setStyleSheet("font-weight:700;")
+        self.lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+
+        # ✅ 직관 버튼
+        self.btn_left = QPushButton("L 요소…")
+        self.btn_right = QPushButton("R 요소…")
+        for b in (self.btn_left, self.btn_right):
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedHeight(24)
+            b.setStyleSheet(
+                "QPushButton{padding:2px 10px; border:1px solid rgba(0,0,0,0.18);"
+                "border-radius:10px; background:rgba(255,255,255,0.85);}"
+                "QPushButton:hover{background:rgba(255,255,255,1.0);}"
+                "QPushButton:pressed{background:rgba(235,235,235,1.0);}"
+            )
+
+        self.btn_left.clicked.connect(self._on_pick_left)
+        self.btn_right.clicked.connect(self._on_pick_right)
+
+        hint = QLabel("X: click=range / drag=zoom · Y band=scale")
+        hint.setStyleSheet("color: rgba(0,0,0,0.35); font-size: 11px;")
+        hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        lay.addWidget(self.lbl, 1)
+        lay.addWidget(self.btn_left, 0)
+        lay.addWidget(self.btn_right, 0)
+        lay.addWidget(hint, 0)
+
+        self.setCursor(Qt.PointingHandCursor)
+
+    def setText(self, t: str):
+        self.lbl.setText(t)
+
+    def mousePressEvent(self, e):
+        # 타이틀 영역 클릭: 좌/우 반으로 판단해도 되고, 버튼도 있으니 유지
+        if e.button() != Qt.LeftButton:
+            return
+        # 버튼 위 클릭은 버튼이 처리
+        if self.btn_left.geometry().contains(e.position().toPoint()) or self.btn_right.geometry().contains(e.position().toPoint()):
+            return
+        if e.position().x() < self.width() * 0.5:
+            self._on_pick_left()
+        else:
+            self._on_pick_right()
+
+
+# =========================================================
+# Chart View: 밴드 하이라이트 + 축 클릭 다이얼로그 + 드래그줌 + crosshair
+# + 알람 halo(QGraphicsEllipseItem)  -> (C++ crash 회피)
+# =========================================================
+class PowerChartView(QChartView):
+    BAND = 14
+
+    def __init__(self, area: "PlotArea", parent=None):
+        super().__init__(parent)
+        self.area = area
+        self.setRenderHint(QPainter.Antialiasing, True)
+        self.setMouseTracking(True)
+        self.setRubberBand(QChartView.NoRubberBand)
+
+        # hover bands
+        self._band_bottom = QGraphicsRectItem()
+        self._band_left = QGraphicsRectItem()
+        self._band_right = QGraphicsRectItem()
+        for it in (self._band_bottom, self._band_left, self._band_right):
+            it.setZValue(9)
+            it.setPen(QPen(QColor(0, 0, 0, 0), 0))
+            it.setBrush(QColor(0, 0, 0, 0))
+            it.setVisible(False)
+
+        # crosshair
+        self._vline = QGraphicsLineItem()
+        self._hline = QGraphicsLineItem()
+        for ln in (self._vline, self._hline):
+            ln.setZValue(10)
+            ln.setPen(QPen(QColor("gray"), 1))
+            ln.setVisible(False)
+
+        # ✅ alarm halo (scene item)  -> series 조작 금지(크래시 회피)
+        self._alarm_halo = QGraphicsEllipseItem()
+        self._alarm_halo.setZValue(11)
+        self._alarm_halo.setPen(QPen(QColor(255, 0, 0, 0), 0))
+        self._alarm_halo.setBrush(QBrush(QColor(255, 0, 0, 60)))
+        self._alarm_halo.setVisible(False)
+
+        self._rubber = QRubberBand(QRubberBand.Rectangle, self)
+        self._dragging = False
+        self._drag_start = QPoint()
+        self._hover_kind: str | None = None
+
+    def _ensure_scene_items(self):
+        sc = self.chart().scene()
+        for it in (self._band_bottom, self._band_left, self._band_right, self._vline, self._hline, self._alarm_halo):
+            if it.scene() is None:
+                sc.addItem(it)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._ensure_scene_items()
+        self._layout_bands()
+
+    def _layout_bands(self):
+        pa: QRectF = self.chart().plotArea()
+        b = self.BAND
+        self._band_bottom.setRect(QRectF(pa.left(), pa.bottom(), pa.width(), b))
+        self._band_left.setRect(QRectF(pa.left() - b, pa.top(), b, pa.height()))
+        self._band_right.setRect(QRectF(pa.right(), pa.top(), b, pa.height()))
+
+    def _set_band_visible(self, which: str | None):
+        self._ensure_scene_items()
+
+        def show(it: QGraphicsRectItem, on: bool):
+            if not on:
+                it.setVisible(False)
+                return
+            it.setVisible(True)
+            it.setBrush(QColor(0, 0, 0, 18))
+            it.setPen(QPen(QColor(0, 0, 0, 30), 1))
+
+        show(self._band_bottom, which == "x_axis")
+        show(self._band_left, which == "y_left")
+        show(self._band_right, which == "y_right")
+
+        if which is None:
+            self.unsetCursor()
+        else:
+            self.setCursor(Qt.PointingHandCursor)
+
+    def _hit_kind(self, pos_view: QPoint) -> str | None:
+        pa = self.chart().plotArea()
+        p_scene = self.mapToScene(pos_view)
+        b = self.BAND
+
+        if QRectF(pa.left(), pa.bottom(), pa.width(), b).contains(p_scene):
+            return "x_axis"
+        if QRectF(pa.left() - b, pa.top(), b, pa.height()).contains(p_scene):
+            return "y_left"
+        if QRectF(pa.right(), pa.top(), b, pa.height()).contains(p_scene):
+            return "y_right"
+        return None
+
+    def _plot_contains(self, pos_view: QPoint) -> bool:
+        pa = self.chart().plotArea()
+        p_scene = self.mapToScene(pos_view)
+        return pa.contains(p_scene)
+
+    def _update_crosshair(self, pos_view: QPoint):
+        self._ensure_scene_items()
+        if not self._plot_contains(pos_view):
+            self._vline.setVisible(False)
+            self._hline.setVisible(False)
+            return
+
+        pa = self.chart().plotArea()
+        p_scene = self.mapToScene(pos_view)
+
+        self._vline.setLine(p_scene.x(), pa.top(), p_scene.x(), pa.bottom())
+        self._vline.setVisible(True)
+
+        self._hline.setLine(pa.left(), p_scene.y(), pa.right(), p_scene.y())
+        self._hline.setVisible(True)
+
+    # ✅ 외부에서 halo 표시/숨김 호출
+    def show_alarm_halo_at(self, series, point: QPointF, on: bool):
+        self._ensure_scene_items()
+        if not on or series is None:
+            self._alarm_halo.setVisible(False)
+            return
+        try:
+            pos = self.chart().mapToPosition(point, series)  # QPointF (chart item coord)
+        except Exception:
+            self._alarm_halo.setVisible(False)
+            return
+
+        r = 14.0
+        self._alarm_halo.setRect(QRectF(pos.x() - r, pos.y() - r, r * 2, r * 2))
+        self._alarm_halo.setVisible(True)
+
+    def mouseMoveEvent(self, e):
+        self._layout_bands()
+
+        if self._dragging:
+            rect = QRect(self._drag_start, e.position().toPoint()).normalized()
+            self._rubber.setGeometry(rect)
+            self._rubber.show()
+        else:
+            kind = self._hit_kind(e.position().toPoint())
+            if kind != self._hover_kind:
+                self._hover_kind = kind
+                self._set_band_visible(kind)
+
+        self._update_crosshair(e.position().toPoint())
+        super().mouseMoveEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() != Qt.LeftButton:
+            return super().mousePressEvent(e)
+
+        kind = self._hit_kind(e.position().toPoint())
+        if kind == "x_axis":
+            self.area.parent_panel._open_x_range_dialog()
+            return
+        if kind == "y_left":
+            self.area.parent_panel._open_y_scale_dialog(side="left")
+            return
+        if kind == "y_right":
+            self.area.parent_panel._open_y_scale_dialog(side="right")
+            return
+
+        if self._plot_contains(e.position().toPoint()):
+            self._dragging = True
+            self._drag_start = e.position().toPoint()
+            self._rubber.hide()
+            return
+
+        return super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self._dragging:
+            self._dragging = False
+            self._rubber.hide()
+
+            rect = QRect(self._drag_start, e.position().toPoint()).normalized()
+            if rect.width() < 6:
+                return
+
+            pa = self.chart().plotArea()
+            p0s = self.mapToScene(rect.topLeft())
+            p1s = self.mapToScene(rect.bottomRight())
+
+            x0_scene = max(pa.left(), min(pa.right(), p0s.x()))
+            x1_scene = max(pa.left(), min(pa.right(), p1s.x()))
+            if abs(x1_scene - x0_scene) < 2:
+                return
+
+            ref_series = self.area._ref_series_for_mapping()
+            if ref_series is None:
+                return
+
+            v0 = self.chart().mapToValue(QPointF(x0_scene, pa.center().y()), ref_series)
+            v1 = self.chart().mapToValue(QPointF(x1_scene, pa.center().y()), ref_series)
+
+            xmin = float(min(v0.x(), v1.x()))
+            xmax = float(max(v0.x(), v1.x()))
+            self.area.parent_panel._apply_zoom_from_chart(area=self.area, xmin=xmin, xmax=xmax)
+            return
+
+        super().mouseReleaseEvent(e)
+
+
+# =========================================================
+# PlotArea (QtCharts)
+# =========================================================
+class PlotArea:
     def __init__(self, parent_panel: "CsvPlotPanel"):
         self.parent_panel = parent_panel
 
-        self.fig = Figure()
-        self.canvas = FigureCanvas(self.fig)
+        self.chart = QChart()
+        self.chart.legend().setVisible(True)
+        self.chart.setBackgroundRoundness(10)
+        self.chart.setMargins(QMargins(0, 0, 0, 0))
 
-        # ✅ 그래프 컨테이너(우측 상단 삭제 버튼 포함)
+        self.view = PowerChartView(self)
+        self.view.setChart(self.chart)
+
+        # container
         self.widget = QWidget()
         wlay = QVBoxLayout(self.widget)
         wlay.setContentsMargins(0, 0, 0, 0)
@@ -195,95 +481,133 @@ class PlotArea:
 
         topbar = QHBoxLayout()
         topbar.setContentsMargins(4, 4, 4, 0)
-        topbar.addStretch(1)
+        topbar.setSpacing(6)
 
         self.btn_delete = QPushButton("✕")
         self.btn_delete.setToolTip("이 그래프 삭제")
         self.btn_delete.setFixedSize(26, 22)
         self.btn_delete.setStyleSheet(
-            "QPushButton{border:1px solid rgba(0,0,0,0.2); border-radius:6px; background:rgba(255,255,255,0.8);}"
+            "QPushButton{border:1px solid rgba(0,0,0,0.2); border-radius:6px; background:rgba(255,255,255,0.85);}"
             "QPushButton:hover{background:rgba(255,255,255,1.0);}"
             "QPushButton:pressed{background:rgba(230,230,230,1.0);}"
         )
         self.btn_delete.clicked.connect(lambda: self.parent_panel.delete_graph(self))
+
+        self.titlebar = TitleBar(
+            on_pick_left=lambda: self.parent_panel._open_y_columns_dialog(side="left", area=self),
+            on_pick_right=lambda: self.parent_panel._open_y_columns_dialog(side="right", area=self),
+        )
+
+        topbar.addWidget(self.titlebar, 1)
         topbar.addWidget(self.btn_delete, 0, Qt.AlignRight)
 
         wlay.addLayout(topbar)
-        wlay.addWidget(self.canvas, 1)
+        wlay.addWidget(self.view, 1)
 
-        # plot axis refs
-        self.ax = None
-        self.ax2 = None
-
-        # ✅ per-graph Y 선택
         self.left_cols: list[str] = []
         self.right_cols: list[str] = []
 
-        # alarm hover
-        self.alarm_scatter = None
-        self.alarm_texts: list[str] = []
-        self.alarm_times: list[pd.Timestamp] = []
-        # ✅ Step info per alarm point
-        self.alarm_step_nos: list[str] = []
-        self.alarm_step_names: list[str] = []
+        self.axis_x_dt: QDateTimeAxis | None = None
+        self.axis_x_num: QValueAxis | None = None
+        self.axis_y_left: QValueAxis | None = None
+        self.axis_y_right: QValueAxis | None = None
 
-        self.hover_annot = None
-        self.alarm_hover_bg = None
+        self.left_series: list[QLineSeries] = []
+        self.right_series: list[QLineSeries] = []
 
-        # crosshair
-        self.vline = None
-        self.hline_left = None
-        self.hline_right = None
+        # alarm
+        self.alarm_series: QScatterSeries | None = None
+        self._alarm_map: dict[int, tuple[str, str, str, str]] = {}  # ms -> (timeStr, text, stepNo, stepName)
 
-        # clickable hover
-        self.hover_kind: str | None = None
-        self.label_default = {"x": None, "yl": None, "yr": None}
-        self.spine_default = {"bottom": None, "left": None, "right": None}
-        self.hover_patch_bottom = None
-        self.hover_patch_left = None
-        self.hover_patch_right = None
-
-        # ✅ drag로 X 범위 선택
-        self.drag_active = False
-        self.drag_x0 = None
-        self.drag_span = None
-
-        # connect mpl events
-        self.canvas.mpl_connect("motion_notify_event", lambda e: self.parent_panel._on_motion(e, self))
-        self.canvas.mpl_connect("button_press_event", lambda e: self.parent_panel._on_press(e, self))
-        self.canvas.mpl_connect("button_release_event", lambda e: self.parent_panel._on_release(e, self))
+    def _ref_series_for_mapping(self):
+        if self.left_series:
+            return self.left_series[0]
+        if self.right_series:
+            return self.right_series[0]
+        if self.alarm_series:
+            return self.alarm_series
+        return None
 
     def clear(self):
-        self.fig.clear()
-        self.ax = None
-        self.ax2 = None
+        # ✅ tooltip/halo 숨김 (hover 이벤트가 남아있어도 안전)
+        try:
+            QToolTip.hideText()
+        except Exception:
+            pass
+        try:
+            self.view.show_alarm_halo_at(self.alarm_series, QPointF(), False)
+        except Exception:
+            pass
 
-        self.alarm_scatter = None
-        self.alarm_texts = []
-        self.alarm_times = []
-        self.alarm_step_nos = []
-        self.alarm_step_names = []
-        self.hover_annot = None
-        self.alarm_hover_bg = None
+        # ✅ hovered disconnect (C++ 크래시 방지)
+        try:
+            if self.alarm_series is not None:
+                try:
+                    self.alarm_series.hovered.disconnect(self.on_alarm_hovered)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
-        self.vline = None
-        self.hline_left = None
-        self.hline_right = None
+        self.chart.removeAllSeries()
+        self.left_series.clear()
+        self.right_series.clear()
 
-        self.hover_kind = None
-        self.label_default = {"x": None, "yl": None, "yr": None}
-        self.spine_default = {"bottom": None, "left": None, "right": None}
-        self.hover_patch_bottom = None
-        self.hover_patch_left = None
-        self.hover_patch_right = None
+        # axes 제거/초기화
+        for ax in (self.axis_x_dt, self.axis_x_num, self.axis_y_left, self.axis_y_right):
+            if ax is not None:
+                try:
+                    self.chart.removeAxis(ax)
+                except Exception:
+                    pass
 
-        self.drag_active = False
-        self.drag_x0 = None
-        self.drag_span = None
+        self.axis_x_dt = None
+        self.axis_x_num = None
+        self.axis_y_left = None
+        self.axis_y_right = None
 
-        self.canvas.draw_idle()
+        self.alarm_series = None
+        self._alarm_map.clear()
+
+        self.titlebar.setText("—")
+
+    # ✅ 고정 메서드 슬롯 (closure 지양)
+    def on_alarm_hovered(self, point: QPointF, state: bool):
+        # series가 사라졌는데 신호가 들어오는 케이스 가드
+        if self.alarm_series is None:
+            return
+
+        # halo(씬 아이템) 표시/숨김
+        self.view.show_alarm_halo_at(self.alarm_series, point, state)
+
+        if not state:
+            QToolTip.hideText()
+            return
+
+        key = int(round(point.x()))
+        info = self._alarm_map.get(key)
+        if not info:
+            return
+
+        time_str, txt, step_no, step_name = info
+        lines = [time_str]
+        if step_no or step_name:
+            if step_no and step_name:
+                lines.append(f"Step: {step_no} | {step_name}")
+            elif step_no:
+                lines.append(f"Step: {step_no}")
+            else:
+                lines.append(f"Step: {step_name}")
+        if txt:
+            lines.append(txt)
+
+        msg = "\n".join(lines)
+        QToolTip.showText(QCursor.pos(), msg, self.view)
 
 
+# =========================================================
+# Main Panel
+# =========================================================
 class CsvPlotPanel(QWidget):
     def __init__(self, alarm_dir: Path, parent=None):
         super().__init__(parent)
@@ -295,16 +619,11 @@ class CsvPlotPanel(QWidget):
         self.x_col: str | None = None
         self.x_is_datetime: bool = False
 
-        # Y 후보 저장
         self._y_candidates: list[str] = []
-
-        # ✅ Step 컬럼 캐시
         self._step_no_col: str | None = None
         self._step_name_col: str | None = None
 
-        # ✅ 그래프 영역(여러개)
         self._areas: list[PlotArea] = []
-
         self._build_ui()
 
     def _build_ui(self):
@@ -323,75 +642,56 @@ class CsvPlotPanel(QWidget):
 
         root.addLayout(title_row)
 
-        # ✅ 컨트롤 컨테이너
+        # 숨김 컨트롤(상태 유지용)
         self.ctrl_widget = QWidget()
         ctrl_layout = QVBoxLayout(self.ctrl_widget)
         ctrl_layout.setContentsMargins(0, 0, 0, 0)
         ctrl_layout.setSpacing(6)
 
-        # =========================
-        # Y(Left)
-        # =========================
         top = QHBoxLayout()
         top.addWidget(QLabel("Y(Left):"))
-
         self.y_combos = [QComboBox(), QComboBox(), QComboBox()]
         for cb in self.y_combos:
             cb.setEnabled(False)
             cb.setMinimumWidth(160)
             top.addWidget(cb, 1)
-
         self.btn_clear_left = QPushButton("Clear L")
         self.btn_clear_left.setEnabled(False)
         self.btn_clear_left.clicked.connect(self.clear_left)
         top.addWidget(self.btn_clear_left)
-
         self.plot_btn = QPushButton("Plot")
         self.plot_btn.setEnabled(False)
         self.plot_btn.clicked.connect(self.plot)
         top.addWidget(self.plot_btn)
-
         ctrl_layout.addLayout(top)
 
-        # =========================
-        # Y2(Right)
-        # =========================
         top2 = QHBoxLayout()
         top2.addWidget(QLabel("Y2(Right):"))
-
         self.y2_combos = [QComboBox(), QComboBox(), QComboBox()]
         for cb in self.y2_combos:
             cb.setEnabled(False)
             cb.setMinimumWidth(160)
             top2.addWidget(cb, 1)
-
         self.btn_clear_right = QPushButton("Clear R")
         self.btn_clear_right.setEnabled(False)
         self.btn_clear_right.clicked.connect(self.clear_right)
         top2.addWidget(self.btn_clear_right)
-
         ctrl_layout.addLayout(top2)
 
-        # =========================
         # X range
-        # =========================
         range_row = QHBoxLayout()
         range_row.addWidget(QLabel("X 범위:"), 0)
-
         self.range_stack = QStackedWidget()
 
         self.dt_widget = QWidget()
         dt_layout = QHBoxLayout(self.dt_widget)
         dt_layout.setContentsMargins(0, 0, 0, 0)
-
         self.dt_start = QDateTimeEdit()
         self.dt_start.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.dt_start.setCalendarPopup(True)
-
         self.dt_end = QDateTimeEdit()
         self.dt_end.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.dt_end.setCalendarPopup(True)
-
         dt_layout.addWidget(QLabel("Start"))
         dt_layout.addWidget(self.dt_start, 1)
         dt_layout.addWidget(QLabel("End"))
@@ -400,15 +700,12 @@ class CsvPlotPanel(QWidget):
         self.num_widget = QWidget()
         num_layout = QHBoxLayout(self.num_widget)
         num_layout.setContentsMargins(0, 0, 0, 0)
-
         self.num_start = QDoubleSpinBox()
         self.num_start.setDecimals(6)
         self.num_start.setRange(-1e30, 1e30)
-
         self.num_end = QDoubleSpinBox()
         self.num_end.setDecimals(6)
         self.num_end.setRange(-1e30, 1e30)
-
         num_layout.addWidget(QLabel("Start"))
         num_layout.addWidget(self.num_start, 1)
         num_layout.addWidget(QLabel("End"))
@@ -416,87 +713,71 @@ class CsvPlotPanel(QWidget):
 
         self.range_stack.addWidget(self.dt_widget)
         self.range_stack.addWidget(self.num_widget)
-
         range_row.addWidget(self.range_stack, 1)
         ctrl_layout.addLayout(range_row)
 
-        # =========================
         # Y scale
-        # =========================
         yscale_row = QHBoxLayout()
         yscale_row.addWidget(QLabel("Left Y Scale:"), 0)
-
         self.left_scale_mode = QComboBox()
         self.left_scale_mode.addItems(["Auto", "Manual"])
         self.left_scale_mode.setEnabled(False)
         yscale_row.addWidget(self.left_scale_mode, 0)
-
         self.left_ymin = QDoubleSpinBox()
         self.left_ymin.setDecimals(6)
         self.left_ymin.setRange(-1e30, 1e30)
         self.left_ymin.setEnabled(False)
         yscale_row.addWidget(QLabel("Min"))
         yscale_row.addWidget(self.left_ymin, 1)
-
         self.left_ymax = QDoubleSpinBox()
         self.left_ymax.setDecimals(6)
         self.left_ymax.setRange(-1e30, 1e30)
         self.left_ymax.setEnabled(False)
         yscale_row.addWidget(QLabel("Max"))
         yscale_row.addWidget(self.left_ymax, 1)
-
-        self.left_log = QCheckBox("Log")
+        self.left_log = QCheckBox("Log")  # UI만
         self.left_log.setEnabled(False)
         yscale_row.addWidget(self.left_log, 0)
-
         self.btn_reset_left_scale = QPushButton("Reset L")
         self.btn_reset_left_scale.setEnabled(False)
         self.btn_reset_left_scale.clicked.connect(self.reset_left_scale)
         yscale_row.addWidget(self.btn_reset_left_scale, 0)
-
         ctrl_layout.addLayout(yscale_row)
 
         y2scale_row = QHBoxLayout()
         y2scale_row.addWidget(QLabel("Right Y2 Scale:"), 0)
-
         self.right_scale_mode = QComboBox()
         self.right_scale_mode.addItems(["Auto", "Manual"])
         self.right_scale_mode.setEnabled(False)
         y2scale_row.addWidget(self.right_scale_mode, 0)
-
         self.right_ymin = QDoubleSpinBox()
         self.right_ymin.setDecimals(6)
         self.right_ymin.setRange(-1e30, 1e30)
         self.right_ymin.setEnabled(False)
         y2scale_row.addWidget(QLabel("Min"))
         y2scale_row.addWidget(self.right_ymin, 1)
-
         self.right_ymax = QDoubleSpinBox()
         self.right_ymax.setDecimals(6)
         self.right_ymax.setRange(-1e30, 1e30)
         self.right_ymax.setEnabled(False)
         y2scale_row.addWidget(QLabel("Max"))
         y2scale_row.addWidget(self.right_ymax, 1)
-
-        self.right_log = QCheckBox("Log")
+        self.right_log = QCheckBox("Log")  # UI만
         self.right_log.setEnabled(False)
         y2scale_row.addWidget(self.right_log, 0)
-
         self.btn_reset_right_scale = QPushButton("Reset R")
         self.btn_reset_right_scale.setEnabled(False)
         self.btn_reset_right_scale.clicked.connect(self.reset_right_scale)
         y2scale_row.addWidget(self.btn_reset_right_scale, 0)
-
         ctrl_layout.addLayout(y2scale_row)
 
         self.left_scale_mode.currentIndexChanged.connect(self._update_scale_enable_state)
         self.right_scale_mode.currentIndexChanged.connect(self._update_scale_enable_state)
 
         root.addWidget(self.ctrl_widget)
+        self.ctrl_widget.setVisible(False)
 
-        # =========================
-        # Plot container (✅ GridLayout로 안전하게)
-        # =========================
+        # plot grid
         self.plot_container = QWidget()
         self.plot_container_layout = QVBoxLayout(self.plot_container)
         self.plot_container_layout.setContentsMargins(0, 0, 0, 0)
@@ -511,7 +792,6 @@ class CsvPlotPanel(QWidget):
         self.plot_container_layout.addWidget(self.plot_grid, 1)
         root.addWidget(self.plot_container, 1)
 
-        # 기본 1개 그래프 생성
         a0 = PlotArea(self)
         self._areas.append(a0)
         self._rebuild_plot_layout()
@@ -520,11 +800,8 @@ class CsvPlotPanel(QWidget):
         self.status.setStyleSheet("color: gray;")
         root.addWidget(self.status)
 
-        # 컨트롤 숨김
-        self.ctrl_widget.setVisible(False)
-
     # -----------------------------
-    # ✅ Layout
+    # layout
     # -----------------------------
     def _clear_grid_layout(self):
         while self.plot_grid_layout.count():
@@ -532,20 +809,14 @@ class CsvPlotPanel(QWidget):
             w = item.widget()
             if w is not None:
                 self.plot_grid_layout.removeWidget(w)
-                # ✅ deleteLater 금지: Qt ownership 꼬임 방지
                 w.setParent(None)
 
     def _rebuild_plot_layout(self):
-        """- 1개: 전체 span
-        - 2개 이상: 2열 n행 (row-major)
-        """
         self._clear_grid_layout()
-
         n = len(self._areas)
         if n == 0:
             return
 
-        # stretch 초기화
         for r in range(20):
             self.plot_grid_layout.setRowStretch(r, 0)
         self.plot_grid_layout.setColumnStretch(0, 0)
@@ -570,14 +841,12 @@ class CsvPlotPanel(QWidget):
         self.plot_grid_layout.setColumnStretch(1, 1)
 
     # -----------------------------
-    # ✅ Add/Delete graph
+    # add/delete
     # -----------------------------
     def add_graph(self):
         area = PlotArea(self)
-        # 새 그래프는 현재 전역 콤보값을 초기값으로 "복사"(이후에는 개별 변경)
         area.left_cols = self._selected_cols(self.y_combos)
         area.right_cols = self._selected_cols(self.y2_combos)
-
         self._areas.append(area)
         self._rebuild_plot_layout()
         self.plot()
@@ -588,16 +857,13 @@ class CsvPlotPanel(QWidget):
         if len(self._areas) <= 1:
             QMessageBox.information(self, "삭제 불가", "최소 1개 그래프는 유지됩니다.")
             return
-
         try:
             area.clear()
         except Exception:
             pass
-
         self._areas.remove(area)
         area.widget.setParent(None)
         area.widget.deleteLater()
-
         self._rebuild_plot_layout()
         self.plot()
 
@@ -665,11 +931,9 @@ class CsvPlotPanel(QWidget):
         self.plot()
 
     def clear_left(self):
-        # ✅ 전역 콤보는 "기본값" 역할만 유지
         for cb in self.y_combos:
             cb.setCurrentText(NONE_ITEM)
         self.status.setText("Left(Y) 선택 해제")
-        # 전역 기본값을 모든 그래프에 강제로 적용하지 않음
         self.plot()
 
     def clear_right(self):
@@ -679,13 +943,11 @@ class CsvPlotPanel(QWidget):
         self.plot()
 
     # -----------------------------
-    # ✅ Step helpers (NEW)
+    # Step detect
     # -----------------------------
     def _detect_step_columns(self):
-        """공정로그에서 Step No / Step Name 컬럼명을 최대한 유연하게 찾는다."""
         self._step_no_col = None
         self._step_name_col = None
-
         if self.df is None:
             return
 
@@ -693,63 +955,46 @@ class CsvPlotPanel(QWidget):
         lower_map = {c: str(c).strip().lower() for c in cols}
 
         def pick(candidates: list[str]) -> str | None:
-            # 1) 정확히 일치
             for c in cols:
                 if lower_map[c] in candidates:
                     return c
-
-            # 2) 공백/특수문자 제거 후 일치/포함
             import re
             norm_map = {c: re.sub(r"[^a-z0-9]", "", lower_map[c]) for c in cols}
-
             for c in cols:
                 for cand in candidates:
                     cand2 = re.sub(r"[^a-z0-9]", "", cand)
                     if cand2 and cand2 == norm_map[c]:
                         return c
-
             for c in cols:
                 v = norm_map[c]
                 for cand in candidates:
                     cand2 = re.sub(r"[^a-z0-9]", "", cand)
                     if cand2 and cand2 in v:
                         return c
-
             return None
 
         self._step_no_col = pick([
             "step no", "stepno", "step number", "stepnumber",
             "step_no", "step-no", "step",
         ])
-
         self._step_name_col = pick([
             "step name", "stepname", "step desc", "stepdesc", "step description",
             "recipe step name", "recipestepname",
         ])
-
         logger.info(f"[STEP] step_no_col={self._step_no_col}, step_name_col={self._step_name_col}")
 
     def _step_info_at(self, t: pd.Timestamp) -> tuple[str | None, str | None]:
-        """알람 발생 시각 t에 해당하는 공정로그의 Step 정보를 반환.
-
-        정책:
-        - x가 datetime일 때만 동작
-        - _x 기준 정렬 후, t 시각 '이전(<=t) 중 가장 가까운 row' 사용
-        """
         if self.df is None or "_x" not in self.df.columns or not self.x_is_datetime:
             return None, None
-
         if self._step_no_col is None and self._step_name_col is None:
             return None, None
 
         d = self.df
-
         cols = ["_x"]
         if self._step_no_col and self._step_no_col in d.columns:
             cols.append(self._step_no_col)
         if self._step_name_col and self._step_name_col in d.columns:
             cols.append(self._step_name_col)
-
         if len(cols) <= 1:
             return None, None
 
@@ -757,14 +1002,11 @@ class CsvPlotPanel(QWidget):
         dd = dd.dropna(subset=["_x"], how="any")
         if dd.empty:
             return None, None
-
         dd = dd.sort_values("_x")
 
-        xs = pd.to_datetime(dd["_x"], errors="coerce")
-        xs = xs.dropna()
+        xs = pd.to_datetime(dd["_x"], errors="coerce").dropna()
         if xs.empty:
             return None, None
-
         dd = dd.loc[xs.index]
 
         pos = xs.searchsorted(t, side="right") - 1
@@ -772,7 +1014,6 @@ class CsvPlotPanel(QWidget):
             return None, None
 
         row = dd.iloc[int(pos)]
-
         step_no = None
         step_name = None
 
@@ -795,7 +1036,6 @@ class CsvPlotPanel(QWidget):
         path = Path(path)
         self.csv_path = path
         self.title.setText(f"선택된 CSV: {path}")
-
         logger.info(f"[MAIN] Load CSV: {path}")
 
         try:
@@ -810,13 +1050,11 @@ class CsvPlotPanel(QWidget):
         df = self._normalize_columns(df)
         self.df = df
 
-        # ✅ Step 컬럼 탐지(NEW)
         self._detect_step_columns()
 
         self.x_col = df.columns[0]
         x_series = df[self.x_col]
         x_dt = pd.to_datetime(x_series, errors="coerce")
-
         valid_dt = int(x_dt.notna().sum())
         logger.debug(f"[MAIN] X col='{self.x_col}', datetime_valid={valid_dt}/{len(x_series)}")
 
@@ -846,7 +1084,6 @@ class CsvPlotPanel(QWidget):
                 y_candidates.append(c)
 
         self._y_candidates = y_candidates[:]
-
         self._set_combos_items(self.y_combos, y_candidates)
         self._set_combos_items(self.y2_combos, y_candidates)
 
@@ -864,7 +1101,6 @@ class CsvPlotPanel(QWidget):
         self.right_log.setEnabled(enabled)
         self.btn_reset_left_scale.setEnabled(enabled)
         self.btn_reset_right_scale.setEnabled(enabled)
-
         self.btn_add_graph.setEnabled(enabled)
 
         self.left_scale_mode.setCurrentText("Auto")
@@ -879,7 +1115,6 @@ class CsvPlotPanel(QWidget):
         # 전역 기본값
         self.y_combos[0].setCurrentIndex(1)
 
-        # 기존 그래프들은 전역 기본값을 "초기값"으로만 맞춰줌 (개별 설정 시작점)
         default_left = self._selected_cols(self.y_combos)
         for a in self._areas:
             if not a.left_cols and not a.right_cols:
@@ -894,16 +1129,12 @@ class CsvPlotPanel(QWidget):
             self.dt_start.setDateTime(now)
             self.dt_end.setDateTime(now)
             return
-
         xmin = x_valid.min()
         xmax = x_valid.max()
-
         qmin = QDateTime.fromString(xmin.strftime("%Y-%m-%d %H:%M:%S"), "yyyy-MM-dd HH:mm:ss")
         qmax = QDateTime.fromString(xmax.strftime("%Y-%m-%d %H:%M:%S"), "yyyy-MM-dd HH:mm:ss")
-
         self.dt_start.setDateTime(qmin)
         self.dt_end.setDateTime(qmax)
-
         self.dt_start.setMinimumDateTime(qmin)
         self.dt_start.setMaximumDateTime(qmax)
         self.dt_end.setMinimumDateTime(qmin)
@@ -917,10 +1148,8 @@ class CsvPlotPanel(QWidget):
             self.num_start.setValue(0)
             self.num_end.setValue(0)
             return
-
         xmin = float(x_valid.min())
         xmax = float(x_valid.max())
-
         self.num_start.setRange(xmin, xmax)
         self.num_end.setRange(xmin, xmax)
         self.num_start.setValue(xmin)
@@ -929,21 +1158,6 @@ class CsvPlotPanel(QWidget):
     def _clear_plot_all(self):
         for a in self._areas:
             a.clear()
-
-    def _apply_y_scale(self, ax, mode: str, ymin_spin: QDoubleSpinBox, ymax_spin: QDoubleSpinBox, log_chk: QCheckBox):
-        ax.set_yscale("log" if log_chk.isChecked() else "linear")
-
-        if mode == "Manual":
-            ymin = float(ymin_spin.value())
-            ymax = float(ymax_spin.value())
-            if ymin == ymax:
-                return
-            if ymin > ymax:
-                ymin, ymax = ymax, ymin
-            ax.set_ylim(ymin, ymax)
-        else:
-            ax.relim()
-            ax.autoscale(axis="y")
 
     # -----------------------------
     # Alarm helpers
@@ -962,8 +1176,6 @@ class CsvPlotPanel(QWidget):
     def _get_target_tube_unitid(self) -> str | None:
         if self.df is None:
             return None
-
-        # TubeID / Tube ID 둘 다 지원
         tube_col = None
         if "TubeID" in self.df.columns:
             tube_col = "TubeID"
@@ -971,11 +1183,9 @@ class CsvPlotPanel(QWidget):
             tube_col = "Tube ID"
         else:
             return None
-
         s = pd.to_numeric(self.df[tube_col], errors="coerce").dropna()
         if s.empty:
             return None
-
         tube_id = int(s.iloc[0])
         suffix = abs(tube_id) % 10
         return f"TUBE{suffix:02d}"
@@ -984,7 +1194,6 @@ class CsvPlotPanel(QWidget):
         yyMMdd = self._get_alarm_date_yyMMdd()
         if yyMMdd is None:
             return None
-
         alarm_path = self.alarm_dir / f"Alarm_{yyMMdd}.csv"
         if not alarm_path.exists():
             return None
@@ -998,7 +1207,6 @@ class CsvPlotPanel(QWidget):
             return None
 
         adf = self._normalize_columns(adf)
-
         required = {"Time", "UnitID", "Set", "Text"}
         if not required.issubset(set(adf.columns)):
             logger.error(f"[ALARM] Missing columns. need={required}, got={set(adf.columns)}")
@@ -1008,7 +1216,6 @@ class CsvPlotPanel(QWidget):
         adf = adf.dropna(subset=["_t"])
 
         target_tube = self._get_target_tube_unitid()
-
         unit_s = adf["UnitID"].astype(str).str.strip()
         set_s = adf["Set"].astype(str).str.strip()
 
@@ -1020,353 +1227,12 @@ class CsvPlotPanel(QWidget):
         filtered = adf.loc[unit_ok & set_ok, ["_t", "Text"]].copy()
         if filtered.empty:
             return None
-
         filtered["Text"] = filtered["Text"].astype(str).fillna("")
         return filtered.sort_values("_t")
 
-    def _add_alarm_markers(self, area: PlotArea, ax):
-        events = self._load_alarm_events()
-        if events is None or events.empty:
-            return
-
-        if self.x_is_datetime:
-            start = pd.Timestamp(self.dt_start.dateTime().toPython())
-            end = pd.Timestamp(self.dt_end.dateTime().toPython())
-            events = events[events["_t"].between(start, end, inclusive="both")]
-        if events.empty:
-            return
-
-        # ✅ 항상 X축 바로 위(하단 2% 부근)
-        ymin, ymax = ax.get_ylim()
-        y_marker = ymin + (ymax - ymin) * 0.02
-
-        xs = events["_t"].tolist()
-        ys = [y_marker] * len(xs)
-
-        area.alarm_texts = events["Text"].tolist()
-        area.alarm_times = [pd.Timestamp(t) for t in events["_t"].tolist()]
-
-        # ✅ 알람 발생 시점 Step 정보 채우기 (NEW)
-        area.alarm_step_nos = []
-        area.alarm_step_names = []
-        for t in area.alarm_times:
-            sn, sname = self._step_info_at(pd.Timestamp(t))
-            area.alarm_step_nos.append("" if sn is None else sn)
-            area.alarm_step_names.append("" if sname is None else sname)
-
-        area.alarm_scatter = ax.scatter(
-            xs, ys,
-            s=60,
-            c="red",              # 또는 color="red"
-            edgecolors="black",
-            linewidths=0.6,
-            picker=8,
-            zorder=6,
-        )
-
-        area.hover_annot = ax.annotate(
-            "",
-            xy=(0, 0),
-            xytext=(12, 12),
-            textcoords="offset points",
-            bbox=dict(boxstyle="round", fc="w", alpha=0.95),
-            arrowprops=dict(arrowstyle="->"),
-            alpha=1,
-        )
-        area.hover_annot.set_visible(False)
-
-        # hover 시 둥근 반투명 강조
-        area.alarm_hover_bg = ax.scatter(
-            [], [],
-            s=300,
-            marker="o",
-            alpha=0.25,
-            linewidths=0,
-            zorder=5,
-            visible=False,
-        )
-
     # -----------------------------
-    # Drag(X zoom): press/move/release
+    # Dialog openers
     # -----------------------------
-    def _on_press(self, event, area: PlotArea):
-        # 1) 축/라벨 클릭 다이얼로그 먼저
-        if self._on_click_dialogs(event, area):
-            return
-
-        # 좌클릭만
-        if getattr(event, "button", None) != 1:
-            return
-
-        # plot 내부에서만 시작
-        if area.ax is None or event.inaxes not in (area.ax, area.ax2):
-            return
-
-        if event.xdata is None:
-            return
-
-        area.drag_active = True
-        area.drag_x0 = float(event.xdata)
-
-        # span 초기화
-        try:
-            if area.drag_span is not None:
-                area.drag_span.remove()
-        except Exception:
-            pass
-
-        # ✅ 반투명 선택 영역
-        area.drag_span = area.ax.axvspan(
-            area.drag_x0,
-            area.drag_x0,
-            ymin=0.0,
-            ymax=1.0,
-            alpha=0.22,
-            facecolor="gray",
-            edgecolor="none",
-            zorder=9,
-        )
-        area.canvas.draw_idle()
-
-    def _on_release(self, event, area: PlotArea):
-        if not area.drag_active:
-            return
-
-        area.drag_active = False
-
-        if area.drag_x0 is None or event.xdata is None:
-            try:
-                if area.drag_span is not None:
-                    area.drag_span.remove()
-            except Exception:
-                pass
-            area.drag_span = None
-            area.drag_x0 = None
-            return
-
-        x0 = float(area.drag_x0)
-        x1 = float(event.xdata)
-        area.drag_x0 = None
-
-        # span 제거
-        try:
-            if area.drag_span is not None:
-                area.drag_span.remove()
-        except Exception:
-            pass
-        area.drag_span = None
-
-        if abs(x1 - x0) < 1e-12:
-            return
-
-        xmin, xmax = (x0, x1) if x0 < x1 else (x1, x0)
-
-        # ✅ X 범위 업데이트 (전역)
-        if self.x_is_datetime:
-            dt0 = mdates.num2date(xmin)
-            dt1 = mdates.num2date(xmax)
-
-            p0 = pd.Timestamp(dt0).tz_localize(None)
-            p1 = pd.Timestamp(dt1).tz_localize(None)
-
-            q0 = QDateTime.fromString(p0.strftime("%Y-%m-%d %H:%M:%S"), "yyyy-MM-dd HH:mm:ss")
-            q1 = QDateTime.fromString(p1.strftime("%Y-%m-%d %H:%M:%S"), "yyyy-MM-dd HH:mm:ss")
-
-            self.dt_start.setDateTime(q0)
-            self.dt_end.setDateTime(q1)
-        else:
-            self.num_start.setValue(float(xmin))
-            self.num_end.setValue(float(xmax))
-
-        self.plot()
-
-    def _on_motion(self, event, area: PlotArea):
-        # drag span update
-        if area.drag_active and area.ax is not None and area.drag_x0 is not None and event.xdata is not None:
-            x0 = float(area.drag_x0)
-            x1 = float(event.xdata)
-            xmin, xmax = (x0, x1) if x0 < x1 else (x1, x0)
-
-            try:
-                if area.drag_span is not None:
-                    area.drag_span.remove()
-            except Exception:
-                pass
-
-            area.drag_span = area.ax.axvspan(
-                xmin, xmax,
-                ymin=0.0, ymax=1.0,
-                alpha=0.22,
-                facecolor="gray",
-                edgecolor="none",
-                zorder=9,
-            )
-            area.canvas.draw_idle()
-
-        self._update_crosshair(event, area)
-        self._update_alarm_tooltip(event, area)
-        self._update_clickable_hover(event, area)
-
-    # -----------------------------
-    # motion: crosshair
-    # -----------------------------
-    def _update_crosshair(self, event, area: PlotArea):
-        if area.ax is None or area.vline is None or area.hline_left is None:
-            return
-
-        if event.inaxes != area.ax and event.inaxes != area.ax2:
-            changed = False
-            for ln in (area.vline, area.hline_left, area.hline_right):
-                if ln is not None and ln.get_visible():
-                    ln.set_visible(False)
-                    changed = True
-            if changed:
-                area.canvas.draw_idle()
-            return
-
-        if event.xdata is None or event.ydata is None:
-            return
-
-        area.vline.set_xdata([event.xdata, event.xdata])
-        area.vline.set_visible(True)
-
-        if event.inaxes == area.ax:
-            area.hline_left.set_ydata([event.ydata, event.ydata])
-            area.hline_left.set_visible(True)
-            if area.hline_right is not None:
-                area.hline_right.set_visible(False)
-        elif event.inaxes == area.ax2 and area.hline_right is not None:
-            area.hline_right.set_ydata([event.ydata, event.ydata])
-            area.hline_right.set_visible(True)
-            area.hline_left.set_visible(False)
-
-        area.canvas.draw_idle()
-
-    # -----------------------------
-    # motion: alarm tooltip + hover bg
-    # -----------------------------
-    def _update_alarm_tooltip(self, event, area: PlotArea):
-        if area.alarm_scatter is None or area.hover_annot is None:
-            return
-
-        if event.inaxes is None:
-            changed = False
-            if area.hover_annot.get_visible():
-                area.hover_annot.set_visible(False)
-                changed = True
-            if area.alarm_hover_bg is not None and area.alarm_hover_bg.get_visible():
-                area.alarm_hover_bg.set_visible(False)
-                changed = True
-            if changed:
-                area.canvas.draw_idle()
-            return
-
-        cont, ind = area.alarm_scatter.contains(event)
-        if not cont or "ind" not in ind or len(ind["ind"]) == 0:
-            changed = False
-            if area.hover_annot.get_visible():
-                area.hover_annot.set_visible(False)
-                changed = True
-            if area.alarm_hover_bg is not None and area.alarm_hover_bg.get_visible():
-                area.alarm_hover_bg.set_visible(False)
-                changed = True
-            if changed:
-                area.canvas.draw_idle()
-            return
-
-        i = int(ind["ind"][0])
-
-        try:
-            offsets = area.alarm_scatter.get_offsets()
-            x_pt, y_pt = offsets[i]
-            t = area.alarm_times[i]
-            txt = area.alarm_texts[i]
-        except Exception:
-            return
-
-        # ✅ Step info (NEW)
-        step_no = ""
-        step_name = ""
-        try:
-            step_no = area.alarm_step_nos[i] if i < len(area.alarm_step_nos) else ""
-            step_name = area.alarm_step_names[i] if i < len(area.alarm_step_names) else ""
-        except Exception:
-            pass
-
-        area.hover_annot.xy = (x_pt, y_pt)
-
-        lines = [pd.Timestamp(t).strftime("%Y-%m-%d %H:%M:%S")]
-        if step_no or step_name:
-            if step_no and step_name:
-                lines.append(f"Step: {step_no} | {step_name}")
-            elif step_no:
-                lines.append(f"Step: {step_no}")
-            else:
-                lines.append(f"Step: {step_name}")
-        if txt:
-            lines.append(str(txt))
-
-        msg = "\n".join(lines)
-
-        area.hover_annot.set_text(msg)
-        area.hover_annot.set_visible(True)
-
-        if area.alarm_hover_bg is not None:
-            area.alarm_hover_bg.set_offsets([[x_pt, y_pt]])
-            area.alarm_hover_bg.set_visible(True)
-
-        area.canvas.draw_idle()
-
-    # -----------------------------
-    # click: 축/라벨 다이얼로그
-    # -----------------------------
-    def _on_click_dialogs(self, event, area: PlotArea) -> bool:
-        if area.ax is None:
-            return False
-
-        ax = area.ax
-        ax2 = area.ax2
-
-        # ✅ 라벨 클릭: 해당 그래프만 설정
-        try:
-            if ax.yaxis.label.contains(event)[0]:
-                self._open_y_columns_dialog(side="left", area=area)
-                return True
-        except Exception:
-            pass
-
-        try:
-            if ax2 is not None and ax2.yaxis.label.contains(event)[0]:
-                self._open_y_columns_dialog(side="right", area=area)
-                return True
-        except Exception:
-            pass
-
-        try:
-            if ax.xaxis.label.contains(event)[0]:
-                self._open_x_range_dialog()
-                return True
-        except Exception:
-            pass
-
-        bbox = ax.bbox
-        pad = 14
-
-        if (bbox.x0 <= event.x <= bbox.x1) and (abs(event.y - bbox.y0) <= pad):
-            self._open_x_range_dialog()
-            return True
-
-        if (bbox.y0 <= event.y <= bbox.y1) and (abs(event.x - bbox.x0) <= pad):
-            self._open_y_scale_dialog(side="left")
-            return True
-
-        if ax2 is not None:
-            if (bbox.y0 <= event.y <= bbox.y1) and (abs(event.x - bbox.x1) <= pad):
-                self._open_y_scale_dialog(side="right")
-                return True
-
-        return False
-
     def _open_y_scale_dialog(self, side: str):
         if side == "left":
             dlg = YScaleDialog(
@@ -1418,7 +1284,6 @@ class CsvPlotPanel(QWidget):
             x_valid = self.df["_x"].dropna()
             if x_valid.empty:
                 return
-
             xmin = pd.Timestamp(x_valid.min())
             xmax = pd.Timestamp(x_valid.max())
             qmin = QDateTime.fromString(xmin.strftime("%Y-%m-%d %H:%M:%S"), "yyyy-MM-dd HH:mm:ss")
@@ -1473,7 +1338,6 @@ class CsvPlotPanel(QWidget):
             else:
                 area.right_cols = selected
         else:
-            # 전역 기본 콤보 반영(원하면)
             combos = self.y_combos if side == "left" else self.y2_combos
             for i, cb in enumerate(combos):
                 cb.setCurrentText(selected[i] if i < len(selected) else NONE_ITEM)
@@ -1481,22 +1345,12 @@ class CsvPlotPanel(QWidget):
         self.plot()
 
     # -----------------------------
-    # ✅ 색상: 한 그래프 내에서 이미 사용한 색은 재사용하지 않기
+    # color helper
     # -----------------------------
     @staticmethod
     def _unique_color_generator():
-        from matplotlib import rcParams
-
-        cyc = rcParams.get("axes.prop_cycle", None)
-        if cyc is None:
-            base = ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"]
-        else:
-            try:
-                base = [d.get("color") for d in cyc]
-                base = [c for c in base if c is not None]
-            except Exception:
-                base = ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"]
-
+        base = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+                "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
         i = 0
         while True:
             if i < len(base):
@@ -1504,53 +1358,46 @@ class CsvPlotPanel(QWidget):
             else:
                 k = i - len(base)
                 hue = (k * 0.61803398875) % 1.0
-                yield (hue, 0.55, 0.85)
+                yield QColor.fromHsvF(hue, 0.55, 0.85).name()
             i += 1
 
     # -----------------------------
-    # X sync
+    # zoom apply
     # -----------------------------
-    def _sync_x_axes(self):
-        """여러 그래프가 있을 때 X축 표시 범위를 동일하게 맞춘다."""
-        if not self._areas:
-            return
-
+    def _apply_zoom_from_chart(self, area: PlotArea, xmin: float, xmax: float):
+        if xmin > xmax:
+            xmin, xmax = xmax, xmin
         if self.x_is_datetime:
-            start = pd.Timestamp(self.dt_start.dateTime().toPython())
-            end = pd.Timestamp(self.dt_end.dateTime().toPython())
-            x0 = mdates.date2num(start.to_pydatetime())
-            x1 = mdates.date2num(end.to_pydatetime())
+            q0 = QDateTime.fromMSecsSinceEpoch(int(xmin))
+            q1 = QDateTime.fromMSecsSinceEpoch(int(xmax))
+            self.dt_start.setDateTime(q0)
+            self.dt_end.setDateTime(q1)
         else:
-            x0 = float(self.num_start.value())
-            x1 = float(self.num_end.value())
-
-        if x0 > x1:
-            x0, x1 = x1, x0
-
-        for a in self._areas:
-            if a.ax is None:
-                continue
-            try:
-                a.ax.set_xlim(x0, x1)
-                if a.ax2 is not None:
-                    a.ax2.set_xlim(x0, x1)
-                a.canvas.draw_idle()
-            except Exception:
-                pass
+            self.num_start.setValue(float(xmin))
+            self.num_end.setValue(float(xmax))
+        self.plot()
 
     # -----------------------------
-    # Plot
+    # minmax helper
+    # -----------------------------
+    @staticmethod
+    def _finite_minmax(series: pd.Series) -> tuple[float | None, float | None]:
+        s = pd.to_numeric(series, errors="coerce").dropna()
+        if s.empty:
+            return None, None
+        return float(s.min()), float(s.max())
+
+    # -----------------------------
+    # plot
     # -----------------------------
     def plot(self):
         if self.df is None or self.csv_path is None:
             return
-
         df0 = self.df
         if "_x" not in df0.columns:
             self.status.setText("내부 x축 컬럼(_x)이 없습니다. CSV를 다시 로드해주세요.")
             return
 
-        # X 범위로 데이터 슬라이스
         df = df0.copy()
         if self.x_is_datetime:
             start = pd.Timestamp(self.dt_start.dateTime().toPython())
@@ -1568,10 +1415,8 @@ class CsvPlotPanel(QWidget):
             self._clear_plot_all()
             return
 
-        # 각 area별로 필요한 컬럼을 모아서 최소 subset
         need_cols = {"_x"}
         for a in self._areas:
-            # 비어있으면 전역 기본값으로 한 번만 채움(기본값 역할)
             if not a.left_cols and not a.right_cols:
                 a.left_cols = self._selected_cols(self.y_combos)
                 a.right_cols = self._selected_cols(self.y2_combos)
@@ -1586,40 +1431,74 @@ class CsvPlotPanel(QWidget):
             if c == "_x":
                 continue
             df[c] = pd.to_numeric(df[c], errors="coerce")
-
-        # 그래프마다 dropna 기준이 달라야 하므로(각자 선택 컬럼), 여기서는 _x만 보장
         df = df.dropna(subset=["_x"], how="any")
         if df.empty:
             self.status.setText("유효한 데이터가 없습니다 (NaN 제거 후)")
             self._clear_plot_all()
             return
 
+        events = self._load_alarm_events()
+        if events is not None and not events.empty and self.x_is_datetime:
+            start_ev = pd.Timestamp(self.dt_start.dateTime().toPython())
+            end_ev = pd.Timestamp(self.dt_end.dateTime().toPython())
+            events = events[events["_t"].between(start_ev, end_ev, inclusive="both")]
+        else:
+            events = None
+
         for area in self._areas:
             area.clear()
-
-            area.ax = area.fig.add_subplot(111)
-            ax = area.ax
-            area.ax2 = ax.twinx()
-            ax2 = area.ax2
 
             left_cols = [c for c in area.left_cols if c in df.columns]
             right_cols = [c for c in area.right_cols if c in df.columns]
 
+            area.titlebar.setText(self.csv_path.name)
+
             if not left_cols and not right_cols:
-                # 아무것도 없으면 빈 플롯
-                ax.set_title(self.csv_path.name)
-                area.canvas.draw_idle()
                 continue
 
-            # area별 데이터 정리
             sub_cols = ["_x"] + left_cols + right_cols
             sub_cols = list(dict.fromkeys(sub_cols))
             dfa = df.loc[:, sub_cols].copy()
             dfa = dfa.dropna(subset=["_x"] + left_cols + right_cols, how="any")
             if dfa.empty:
-                ax.set_title(self.csv_path.name)
-                area.canvas.draw_idle()
                 continue
+
+            chart = area.chart
+            chart.setTitle("")
+            chart.legend().setVisible(True)
+
+            # axes
+            if self.x_is_datetime:
+                ax_x = QDateTimeAxis()
+                ax_x.setFormat("MM-dd HH:mm")
+                ax_x.setTitleText("")  # ✅ 축 타이틀 숨김
+                ax_x.setTickCount(6)
+                ax_x.setRange(self.dt_start.dateTime(), self.dt_end.dateTime())
+                area.axis_x_dt = ax_x
+                chart.addAxis(ax_x, Qt.AlignBottom)
+            else:
+                ax_x = QValueAxis()
+                ax_x.setTitleText("")  # ✅ 축 타이틀 숨김
+                x0 = float(self.num_start.value())
+                x1 = float(self.num_end.value())
+                if x0 > x1:
+                    x0, x1 = x1, x0
+                ax_x.setRange(x0, x1)
+                ax_x.setTickCount(6)
+                area.axis_x_num = ax_x
+                chart.addAxis(ax_x, Qt.AlignBottom)
+
+            ax_l = QValueAxis()
+            ax_l.setTitleText("")  # ✅ Left 타이틀 숨김
+            ax_l.setTickCount(6)
+            area.axis_y_left = ax_l
+            chart.addAxis(ax_l, Qt.AlignLeft)
+
+            ax_r = QValueAxis()
+            ax_r.setTitleText("")  # ✅ Right 타이틀 숨김
+            ax_r.setTickCount(6)
+            area.axis_y_right = ax_r
+            chart.addAxis(ax_r, Qt.AlignRight)
 
             used_colors = set()
             color_gen = self._unique_color_generator()
@@ -1629,305 +1508,139 @@ class CsvPlotPanel(QWidget):
                     c = next(color_gen)
                     if c not in used_colors:
                         used_colors.add(c)
-                        return c
+                        return QColor(c)
 
+            left_min, left_max = None, None
             for c in left_cols:
-                ax.plot(dfa["_x"], dfa[c], label=f"L:{c}", color=pick_color())
-            ax.set_xlabel(self.x_col if self.x_col else "X")
-            ax.set_ylabel("Left Y")
+                s = QLineSeries()
+                s.setName(f"L:{c}")
+                pen = s.pen()
+                pen.setWidthF(1.6)
+                pen.setColor(pick_color())
+                s.setPen(pen)
 
-            if right_cols:
-                for c in right_cols:
-                    ax2.plot(dfa["_x"], dfa[c], label=f"R:{c}", color=pick_color())
-            ax2.set_ylabel("Right Y2")
+                for x, y in zip(dfa["_x"], dfa[c]):
+                    if self.x_is_datetime:
+                        ms = int(pd.Timestamp(x).to_pydatetime().timestamp() * 1000)
+                        s.append(ms, float(y))
+                    else:
+                        s.append(float(x), float(y))
 
-            try:
-                area.label_default["x"] = (ax.xaxis.label.get_color(), ax.xaxis.label.get_fontweight())
-                area.label_default["yl"] = (ax.yaxis.label.get_color(), ax.yaxis.label.get_fontweight())
-                area.spine_default["bottom"] = ax.spines["bottom"].get_linewidth()
-                area.spine_default["left"] = ax.spines["left"].get_linewidth()
-                area.label_default["yr"] = (ax2.yaxis.label.get_color(), ax2.yaxis.label.get_fontweight())
-                area.spine_default["right"] = ax2.spines["right"].get_linewidth()
-            except Exception:
-                pass
+                chart.addSeries(s)
+                if area.axis_x_dt is not None:
+                    s.attachAxis(area.axis_x_dt)
+                if area.axis_x_num is not None:
+                    s.attachAxis(area.axis_x_num)
+                s.attachAxis(ax_l)
+                area.left_series.append(s)
 
-            ax.set_title(self.csv_path.name)
+                mn, mx = self._finite_minmax(dfa[c])
+                if mn is not None:
+                    left_min = mn if left_min is None else min(left_min, mn)
+                    left_max = mx if left_max is None else max(left_max, mx)
 
-            handles, labels = ax.get_legend_handles_labels()
-            h2, l2 = ax2.get_legend_handles_labels()
-            handles += h2
-            labels += l2
-            if labels:
-                ax.legend(handles, labels, loc="best")
+            right_min, right_max = None, None
+            for c in right_cols:
+                s = QLineSeries()
+                s.setName(f"R:{c}")
+                pen = s.pen()
+                pen.setWidthF(1.6)
+                pen.setColor(pick_color())
+                s.setPen(pen)
 
-            if self.x_is_datetime:
-                for tick in ax.get_xticklabels():
-                    tick.set_rotation(30)
-                    tick.set_ha("right")
+                for x, y in zip(dfa["_x"], dfa[c]):
+                    if self.x_is_datetime:
+                        ms = int(pd.Timestamp(x).to_pydatetime().timestamp() * 1000)
+                        s.append(ms, float(y))
+                    else:
+                        s.append(float(x), float(y))
 
-            self._apply_y_scale(ax, self.left_scale_mode.currentText(), self.left_ymin, self.left_ymax, self.left_log)
-            self._apply_y_scale(ax2, self.right_scale_mode.currentText(), self.right_ymin, self.right_ymax, self.right_log)
+                chart.addSeries(s)
+                if area.axis_x_dt is not None:
+                    s.attachAxis(area.axis_x_dt)
+                if area.axis_x_num is not None:
+                    s.attachAxis(area.axis_x_num)
+                s.attachAxis(ax_r)
+                area.right_series.append(s)
 
-            self._add_alarm_markers(area, ax)
+                mn, mx = self._finite_minmax(dfa[c])
+                if mn is not None:
+                    right_min = mn if right_min is None else min(right_min, mn)
+                    right_max = mx if right_max is None else max(right_max, mx)
 
-            area.fig.tight_layout()
+            if left_min is not None and left_max is not None:
+                if left_min == left_max:
+                    left_max = left_min + 1.0
+                ax_l.setRange(left_min, left_max)
+                ax_l.applyNiceNumbers()
 
-            # hover 영역 패치
-            pos = ax.get_position()
-            pad = 0.008
-            band_h = 0.060
-            band_w = 0.070
+            if right_min is not None and right_max is not None:
+                if right_min == right_max:
+                    right_max = right_min + 1.0
+                ax_r.setRange(right_min, right_max)
+                ax_r.applyNiceNumbers()
 
-            bx = pos.x0
-            by = max(0.0, pos.y0 - band_h - pad)
-            bw = pos.width
-            bh = min(band_h, pos.y0 - pad) if pos.y0 > pad else band_h
+            if self.left_scale_mode.currentText() == "Manual":
+                ymin = float(self.left_ymin.value())
+                ymax = float(self.left_ymax.value())
+                if ymin != ymax:
+                    if ymin > ymax:
+                        ymin, ymax = ymax, ymin
+                    ax_l.setRange(ymin, ymax)
 
-            area.hover_patch_bottom = FancyBboxPatch(
-                (bx, by), bw, bh,
-                transform=area.fig.transFigure, clip_on=False,
-                boxstyle="round,pad=0.006,rounding_size=0.012",
-                facecolor=(0, 0, 0, 0.06), edgecolor=(0, 0, 0, 0.12), linewidth=1.0,
-                visible=False,
-                zorder=0.5,
-            )
-            area.fig.add_artist(area.hover_patch_bottom)
+            if self.right_scale_mode.currentText() == "Manual":
+                ymin = float(self.right_ymin.value())
+                ymax = float(self.right_ymax.value())
+                if ymin != ymax:
+                    if ymin > ymax:
+                        ymin, ymax = ymax, ymin
+                    ax_r.setRange(ymin, ymax)
 
-            lx = max(0.02, pos.x0 - band_w - pad)
-            ly = pos.y0
-            lw = min(band_w, pos.x0 - pad) if pos.x0 > pad else band_w
-            lh = pos.height
+            # alarms
+            if events is not None and not events.empty and self.x_is_datetime:
+                y_marker = ax_l.min() + (ax_l.max() - ax_l.min()) * 0.02
 
-            area.hover_patch_left = FancyBboxPatch(
-                (lx, ly), lw, lh,
-                transform=area.fig.transFigure, clip_on=False,
-                boxstyle="round,pad=0.006,rounding_size=0.012",
-                facecolor=(0, 0, 0, 0.06), edgecolor=(0, 0, 0, 0.12), linewidth=1.0,
-                visible=False,
-                zorder=0.5,
-            )
-            area.fig.add_artist(area.hover_patch_left)
+                alarm = QScatterSeries()
+                alarm.setName("Alarm")
+                alarm.setMarkerShape(QScatterSeries.MarkerShapeCircle)
+                alarm.setMarkerSize(10.0)
+                alarm.setColor(QColor("red"))
+                alarm.setBorderColor(QColor("black"))
 
-            rx = min(1.0 - band_w, pos.x1 + pad)
-            ry = pos.y0
-            rw = min(band_w, 1.0 - pos.x1 - pad) if (1.0 - pos.x1) > pad else band_w
-            rh = pos.height
+                chart.addSeries(alarm)
+                alarm.attachAxis(area.axis_x_dt)
+                alarm.attachAxis(ax_l)
 
-            area.hover_patch_right = FancyBboxPatch(
-                (rx, ry), rw, rh,
-                transform=area.fig.transFigure, clip_on=False,
-                boxstyle="round,pad=0.006,rounding_size=0.012",
-                facecolor=(0, 0, 0, 0.06), edgecolor=(0, 0, 0, 0.12), linewidth=1.0,
-                visible=False,
-                zorder=0.5,
-            )
-            area.fig.add_artist(area.hover_patch_right)
+                area.alarm_series = alarm
+                area._alarm_map.clear()
 
-            # ✅ 십자선: 회색
-            area.vline = ax.axvline(x=dfa["_x"].iloc[0], visible=False, linewidth=0.8, color="gray")
-            area.hline_left = ax.axhline(y=0, visible=False, linewidth=0.8, color="gray")
-            area.hline_right = ax2.axhline(y=0, visible=False, linewidth=0.8, color="gray")
+                for t, txt in zip(events["_t"].tolist(), events["Text"].tolist()):
+                    ts = pd.Timestamp(t)
+                    ms = int(ts.to_pydatetime().timestamp() * 1000)
+                    alarm.append(ms, y_marker)
 
-            area.canvas.draw_idle()
+                    sn, sname = self._step_info_at(ts)
+                    time_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+                    area._alarm_map[int(ms)] = (
+                        time_str,
+                        str(txt) if txt else "",
+                        "" if sn is None else str(sn),
+                        "" if sname is None else str(sname),
+                    )
 
-        # 상태
+                # ✅ 고정 메서드 슬롯 연결 (clear에서 disconnect)
+                alarm.hovered.connect(area.on_alarm_hovered)
+
+            area.view._layout_bands()
+
         self.status.setText(
-            f"표시 중: {len(df)} rows | Graphs={len(self._areas)} | (X drag=zoom, label click=dialog)"
+            f"표시 중: {len(df)} rows | Graphs={len(self._areas)} | (Title/L·R 버튼=요소, X click=range, X drag=zoom, Y band=scale)"
         )
 
-        # ✅ 여러 그래프 X축 동기화(표시범위)
-        self._sync_x_axes()
 
-    # -----------------------------
-    # Hover 강조(축/라벨)
-    # -----------------------------
-    def _set_hover_kind(self, area: PlotArea, kind: str | None):
-        if kind == area.hover_kind:
-            return
-        area.hover_kind = kind
-
-        if kind is None:
-            area.canvas.unsetCursor()
-        else:
-            area.canvas.setCursor(Qt.PointingHandCursor)
-
-        ax = area.ax
-        ax2 = area.ax2
-        if ax is None:
-            return
-
-        xlab = ax.xaxis.label
-        ylab_l = ax.yaxis.label
-        ylab_r = ax2.yaxis.label if ax2 is not None else None
-
-        def _restore_label(label, key: str):
-            if label is None:
-                return
-            v = area.label_default.get(key)
-            if v and v[0] is not None and v[1] is not None:
-                label.set_color(v[0])
-                label.set_fontweight(v[1])
-                label.set_alpha(1.0)
-            label.set_bbox(None)
-
-        def _highlight_label(label):
-            if label is None:
-                return
-            label.set_fontweight("bold")
-            label.set_alpha(1.0)
-            label.set_bbox(dict(
-                boxstyle="round,pad=0.35,rounding_size=0.25",
-                facecolor=(0, 0, 0, 0.06),
-                edgecolor=(0, 0, 0, 0.12),
-                linewidth=1.0,
-            ))
-
-        def _restore_spine(which: str):
-            lw = area.spine_default.get(which)
-            if lw is None:
-                return
-            if which == "bottom":
-                ax.spines["bottom"].set_linewidth(lw)
-            elif which == "left":
-                ax.spines["left"].set_linewidth(lw)
-            elif which == "right" and ax2 is not None:
-                ax2.spines["right"].set_linewidth(lw)
-
-        def _highlight_spine(which: str):
-            if which == "bottom":
-                ax.spines["bottom"].set_linewidth(2.0)
-            elif which == "left":
-                ax.spines["left"].set_linewidth(2.0)
-            elif which == "right" and ax2 is not None:
-                ax2.spines["right"].set_linewidth(2.0)
-
-        def _ticks_normal():
-            ax.tick_params(axis="x", width=1.0)
-            ax.tick_params(axis="y", width=1.0)
-            for t in ax.get_xticklabels():
-                t.set_fontweight("normal")
-                t.set_alpha(1.0)
-            for t in ax.get_yticklabels():
-                t.set_fontweight("normal")
-                t.set_alpha(1.0)
-            if ax2 is not None:
-                ax2.tick_params(axis="y", width=1.0)
-                for t in ax2.get_yticklabels():
-                    t.set_fontweight("normal")
-                    t.set_alpha(1.0)
-
-        def _ticks_bold_x():
-            ax.tick_params(axis="x", width=2.0)
-            for t in ax.get_xticklabels():
-                t.set_fontweight("bold")
-                t.set_alpha(1.0)
-
-        def _ticks_bold_y_left():
-            ax.tick_params(axis="y", width=2.0)
-            for t in ax.get_yticklabels():
-                t.set_fontweight("bold")
-                t.set_alpha(1.0)
-
-        def _ticks_bold_y_right():
-            if ax2 is None:
-                return
-            ax2.tick_params(axis="y", width=2.0)
-            for t in ax2.get_yticklabels():
-                t.set_fontweight("bold")
-                t.set_alpha(1.0)
-
-        def _hide_patches():
-            for p in (area.hover_patch_bottom, area.hover_patch_left, area.hover_patch_right):
-                if p is not None:
-                    p.set_visible(False)
-
-        def _show_patch(which: str):
-            _hide_patches()
-            p = None
-            if which == "bottom":
-                p = area.hover_patch_bottom
-            elif which == "left":
-                p = area.hover_patch_left
-            elif which == "right":
-                p = area.hover_patch_right
-            if p is not None:
-                p.set_visible(True)
-
-        _restore_label(xlab, "x")
-        _restore_label(ylab_l, "yl")
-        _restore_label(ylab_r, "yr")
-        _restore_spine("bottom")
-        _restore_spine("left")
-        _restore_spine("right")
-        _ticks_normal()
-        _hide_patches()
-
-        if kind == "x_label":
-            _highlight_label(xlab)
-        elif kind == "y_label_left":
-            _highlight_label(ylab_l)
-        elif kind == "y_label_right":
-            _highlight_label(ylab_r)
-        elif kind == "x_axis":
-            _highlight_spine("bottom")
-            _ticks_bold_x()
-            _show_patch("bottom")
-        elif kind == "y_axis_left":
-            _highlight_spine("left")
-            _ticks_bold_y_left()
-            _show_patch("left")
-        elif kind == "y_axis_right":
-            _highlight_spine("right")
-            _ticks_bold_y_right()
-            _show_patch("right")
-
-        area.canvas.draw_idle()
-
-    def _update_clickable_hover(self, event, area: PlotArea):
-        ax = area.ax
-        if ax is None:
-            self._set_hover_kind(area, None)
-            return
-        ax2 = area.ax2
-
-        try:
-            if ax.yaxis.label.contains(event)[0]:
-                self._set_hover_kind(area, "y_label_left")
-                return
-        except Exception:
-            pass
-        try:
-            if ax2 is not None and ax2.yaxis.label.contains(event)[0]:
-                self._set_hover_kind(area, "y_label_right")
-                return
-        except Exception:
-            pass
-        try:
-            if ax.xaxis.label.contains(event)[0]:
-                self._set_hover_kind(area, "x_label")
-                return
-        except Exception:
-            pass
-
-        bbox = ax.bbox
-        pad = 14
-
-        if (bbox.x0 <= event.x <= bbox.x1) and (abs(event.y - bbox.y0) <= pad):
-            self._set_hover_kind(area, "x_axis")
-            return
-
-        if (bbox.y0 <= event.y <= bbox.y1) and (abs(event.x - bbox.x0) <= pad):
-            self._set_hover_kind(area, "y_axis_left")
-            return
-
-        if ax2 is not None:
-            if (bbox.y0 <= event.y <= bbox.y1) and (abs(event.x - bbox.x1) <= pad):
-                self._set_hover_kind(area, "y_axis_right")
-                return
-
-        self._set_hover_kind(area, None)
-
-
+# =========================================================
+# MainWindow
+# =========================================================
 class MainWindow(QMainWindow):
     def __init__(self, root_dir: str | Path, alarm_dir: str | Path):
         super().__init__()
@@ -1953,13 +1666,10 @@ class MainWindow(QMainWindow):
         self.tree = QTreeView()
         self.tree.setModel(self.model)
         self.tree.setRootIndex(self.model.index(str(self.root_dir)))
-
         for col in range(1, self.model.columnCount()):
             self.tree.hideColumn(col)
-
         self.tree.setAnimated(True)
         self.tree.doubleClicked.connect(self.on_tree_double_clicked)
-
         splitter.addWidget(self.tree)
 
         self.plot_panel = CsvPlotPanel(alarm_dir=self.alarm_dir)
@@ -1980,17 +1690,16 @@ class MainWindow(QMainWindow):
             else:
                 self.tree.expand(index)
             return
-
         self.plot_panel.load_csv(path)
 
 
 def main():
     app = QApplication(sys.argv)
 
-    # root_dir = r"C:\hmi\System\RecipeProcLog"
-    root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
-    # alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
-    alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
+    # root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
+    root_dir = r"C:\hmi\System\RecipeProcLog"
+    # alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
+    alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
 
     win = MainWindow(root_dir=root_dir, alarm_dir=alarm_dir)
     win.show()
