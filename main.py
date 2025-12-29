@@ -1987,8 +1987,10 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
 
-    root_dir = r"C:\hmi\System\RecipeProcLog"
-    alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
+    # root_dir = r"C:\hmi\System\RecipeProcLog"
+    root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
+    # alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
+    alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
 
     win = MainWindow(root_dir=root_dir, alarm_dir=alarm_dir)
     win.show()
