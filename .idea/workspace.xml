@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="225c8168-e893-4b53-808a-a9f4aedbaaf5" name="변경" comment="Replace matplotlib-based plotting with QtCharts for enhanced interactivity and simplified integration.">
+    <list default="true" id="225c8168-e893-4b53-808a-a9f4aedbaaf5" name="변경" comment="Add extensive debug logging for UI interactions, plotting processes, and alarm data handling to improve traceability and issue diagnostics.">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
@@ -67,7 +67,7 @@
     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
     &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
     &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;swagger&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.pluginManager&quot;,
     &quot;to.speed.mode.migration.done&quot;: &quot;true&quot;,
     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
@@ -98,7 +98,12 @@
       <workItem from="1766755868843" duration="17586000" />
       <workItem from="1766783221843" duration="1183000" />
       <workItem from="1767032148732" duration="7894000" />
-      <workItem from="1767120639061" duration="1455000" />
+      <workItem from="1767120639061" duration="1722000" />
+      <workItem from="1767208026502" duration="1500000" />
+      <workItem from="1767368738162" duration="26000" />
+      <workItem from="1768929945487" duration="702000" />
+      <workItem from="1769010977248" duration="41000" />
+      <workItem from="1769011027425" duration="1897000" />
     </task>
     <task id="LOCAL-00001" summary="New Project">
       <option name="closed" value="true" />
@@ -148,7 +153,15 @@
       <option name="project" value="LOCAL" />
       <updated>1767045487993</updated>
     </task>
-    <option name="localTasksCounter" value="7" />
+    <task id="LOCAL-00007" summary="Add extensive debug logging for UI interactions, plotting processes, and alarm data handling to improve traceability and issue diagnostics.">
+      <option name="closed" value="true" />
+      <created>1767122360673</created>
+      <option name="number" value="00007" />
+      <option name="presentableId" value="LOCAL-00007" />
+      <option name="project" value="LOCAL" />
+      <updated>1767122360673</updated>
+    </task>
+    <option name="localTasksCounter" value="8" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -170,10 +183,11 @@
     <MESSAGE value="Add main application and CSV plotting panel" />
     <MESSAGE value="Remove unused main application and CSV plotting panel" />
     <MESSAGE value="Replace matplotlib-based plotting with QtCharts for enhanced interactivity and simplified integration." />
-    <option name="LAST_COMMIT_MESSAGE" value="Replace matplotlib-based plotting with QtCharts for enhanced interactivity and simplified integration." />
+    <MESSAGE value="Add extensive debug logging for UI interactions, plotting processes, and alarm data handling to improve traceability and issue diagnostics." />
+    <option name="LAST_COMMIT_MESSAGE" value="Add extensive debug logging for UI interactions, plotting processes, and alarm data handling to improve traceability and issue diagnostics." />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/DFAM$logger.coverage" NAME="logger 커버리지 결과" MODIFIED="1766695351526" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/utils" />
-    <SUITE FILE_PATH="coverage/DFAM$main.coverage" NAME="main 커버리지 결과" MODIFIED="1767121449174" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/DFAM$main.coverage" NAME="main 커버리지 결과" MODIFIED="1769016217511" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
 </project>
