@@ -11,7 +11,8 @@ from PySide6.QtWidgets import (
     QLabel, QComboBox, QPushButton, QStackedWidget,
     QDateTimeEdit, QDoubleSpinBox, QMessageBox, QCheckBox,
     QDialog, QDialogButtonBox, QFormLayout, QListWidget, QListWidgetItem,
-    QAbstractItemView, QGridLayout, QToolTip, QRubberBand
+    QAbstractItemView, QGridLayout, QToolTip, QRubberBand,
+    QSizePolicy
 )
 
 from PySide6.QtCharts import (
@@ -193,11 +194,11 @@ class YColumnsDialog(QDialog):
             item.setSelected(it in sel_set)
             self.listw.addItem(item)
 
-        hint = QLabel("최대 3개까지 선택 가능합니다.")
+        hint = QLabel("여러개 선택 가능합니다.")
         hint.setStyleSheet("color: gray;")
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self._accept_checked)
+        btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
 
         root = QVBoxLayout(self)
@@ -293,6 +294,15 @@ class PowerChartView(QChartView):
         self.setRenderHint(QPainter.Antialiasing, True)
         self.setMouseTracking(True)
         self.setRubberBand(QChartView.NoRubberBand)
+
+        self.setMinimumSize(0, 0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        # (가능하면) 레전드가 최소폭 만들지 않게
+        try:
+            self.chart().legend().setAlignment(Qt.AlignBottom)
+        except Exception:
+            pass
 
         logger.debug("[UI][PowerChartView] init")
 
@@ -428,7 +438,25 @@ class PowerChartView(QChartView):
                 self._set_band_visible(kind)
 
         self._update_crosshair(e.position().toPoint())
+
+        if self._plot_contains(e.position().toPoint()):
+            ref_series = self.area._ref_series_for_mapping()
+            if ref_series is not None:
+                pa = self.chart().plotArea()
+                p_scene = self.mapToScene(e.position().toPoint())
+                v = self.chart().mapToValue(QPointF(p_scene.x(), pa.center().y()), ref_series)
+                x = float(v.x())
+                self.area.show_crosshair_values(x, True)
+            else:
+                self.area.show_crosshair_values(0.0, False)
+        else:
+            self.area.show_crosshair_values(0.0, False)
+
         super().mouseMoveEvent(e)
+
+    def leaveEvent(self, e):
+        self.area.show_crosshair_values(0.0, False)
+        super().leaveEvent(e)
 
     def mousePressEvent(self, e):
         if e.button() != Qt.LeftButton:
@@ -499,15 +527,24 @@ class PlotArea:
         self.parent_panel = parent_panel
 
         self.chart = QChart()
+        self.chart.legend().setAlignment(Qt.AlignBottom)
         self.chart.legend().setVisible(True)
         self.chart.setBackgroundRoundness(10)
         self.chart.setMargins(QMargins(0, 0, 0, 0))
+
+        try:
+            self.chart.layout().setContentsMargins(0, 0, 0, 0)
+        except Exception:
+            pass
 
         self.view = PowerChartView(self)
         self.view.setChart(self.chart)
 
         # container
         self.widget = QWidget()
+        self.widget.setMinimumSize(0, 0)
+        self.widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
         wlay = QVBoxLayout(self.widget)
         wlay.setContentsMargins(0, 0, 0, 0)
         wlay.setSpacing(0)
@@ -549,10 +586,82 @@ class PlotArea:
         self.right_series: list[QLineSeries] = []
 
         # alarm
+        self._alarm_hovering: bool = False
         self.alarm_series: QScatterSeries | None = None
         self._alarm_map: dict[int, tuple[str, str, str, str]] = {}  # ms -> (timeStr, text, stepNo, stepName)
 
         logger.debug("[PLOT][PlotArea] created")
+
+    def _find_nearest_y(self, series: QLineSeries, x: float) -> float | None:
+        """series에서 x에 가장 가까운 점의 y를 반환. (x는 ms 또는 numeric)"""
+        try:
+            pts = series.points()
+        except Exception:
+            return None
+        n = len(pts)
+        if n == 0:
+            return None
+
+        # pts는 x 증가 순으로 들어있다고 가정 (현재 append 방식상 대부분 그렇다)
+        lo, hi = 0, n - 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if pts[mid].x() < x:
+                lo = mid + 1
+            else:
+                hi = mid
+
+        i = lo
+        # i 주변(왼쪽/오른쪽) 중 더 가까운 점 선택
+        best = i
+        if i > 0 and abs(pts[i - 1].x() - x) <= abs(pts[i].x() - x):
+            best = i - 1
+
+        return float(pts[best].y())
+
+    def show_crosshair_values(self, x: float, on: bool):
+        """현재 x 위치에서 left/right 모든 시리즈 값을 툴팁으로 표시"""
+        if not on:
+            QToolTip.hideText()
+            return
+
+        lines: list[str] = []
+
+        if self._alarm_hovering:
+            return
+
+        # X 표시
+        if self.parent_panel.x_is_datetime:
+            qdt = QDateTime.fromMSecsSinceEpoch(int(x))
+            lines.append(qdt.toString("yyyy-MM-dd HH:mm:ss"))
+        else:
+            lines.append(f"X = {x:.6g}")
+
+        # Left series
+        if self.left_series:
+            lines.append("")
+            lines.append("[Left]")
+            for s in self.left_series:
+                y = self._find_nearest_y(s, x)
+                if y is None:
+                    continue
+                # s.name() = "L:컬럼명"
+                lines.append(f"{s.name()} = {y:.6g}")
+
+        # Right series
+        if self.right_series:
+            lines.append("")
+            lines.append("[Right]")
+            for s in self.right_series:
+                y = self._find_nearest_y(s, x)
+                if y is None:
+                    continue
+                lines.append(f"{s.name()} = {y:.6g}")
+
+        msg = "\n".join(lines).strip()
+        if msg:
+            pos = QCursor.pos() + QPoint(18, 18)
+            QToolTip.showText(pos, msg, self.view)
 
     def _ref_series_for_mapping(self):
         if self.left_series:
@@ -614,6 +723,8 @@ class PlotArea:
         if self.alarm_series is None:
             return
 
+        self._alarm_hovering = bool(state)
+
         # halo(씬 아이템) 표시/숨김
         self.view.show_alarm_halo_at(self.alarm_series, point, state)
 
@@ -661,6 +772,8 @@ class CsvPlotPanel(QWidget):
         self._step_name_col: str | None = None
 
         self._areas: list[PlotArea] = []
+
+        self._last_cols: int | None = None
 
         logger.info(f"[MAIN] CsvPlotPanel init alarm_dir={self.alarm_dir}")
         self._build_ui()
@@ -840,6 +953,20 @@ class CsvPlotPanel(QWidget):
         self.status.setStyleSheet("color: gray;")
         root.addWidget(self.status)
 
+    def _desired_cols(self) -> int:
+        n = len(self._areas)
+
+        if n <= 1:
+            return 1
+
+        return 1 if self.width() < 1100 else 2
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        cols = self._desired_cols()
+        if cols != self._last_cols:
+            self._rebuild_plot_layout(force=True)
+
     # -----------------------------
     # layout
     # -----------------------------
@@ -852,35 +979,36 @@ class CsvPlotPanel(QWidget):
                 self.plot_grid_layout.removeWidget(w)
                 w.setParent(None)
 
-    def _rebuild_plot_layout(self):
+    def _rebuild_plot_layout(self, force: bool = False):
         n = len(self._areas)
-        logger.debug(f"[UI][Layout] rebuild_plot_layout graphs={n}")
+        cols = self._desired_cols()
+
+        if not force and self._last_cols == cols:
+            return
+        self._last_cols = cols
+
+        logger.debug(f"[UI][Layout] rebuild_plot_layout graphs={n}, cols={cols}")
         self._clear_grid_layout()
         if n == 0:
             return
 
-        for r in range(20):
+        # stretch 초기화
+        for r in range(50):
             self.plot_grid_layout.setRowStretch(r, 0)
-        self.plot_grid_layout.setColumnStretch(0, 0)
-        self.plot_grid_layout.setColumnStretch(1, 0)
+        for c in range(5):
+            self.plot_grid_layout.setColumnStretch(c, 0)
 
-        if n == 1:
-            self.plot_grid_layout.addWidget(self._areas[0].widget, 0, 0, 1, 2)
-            self.plot_grid_layout.setRowStretch(0, 1)
-            self.plot_grid_layout.setColumnStretch(0, 1)
-            self.plot_grid_layout.setColumnStretch(1, 1)
-            return
-
-        rows = (n + 1) // 2
+        # 배치
+        rows = (n + cols - 1) // cols
         for i, area in enumerate(self._areas):
-            r = i // 2
-            c = i % 2
+            r = i // cols
+            c = i % cols
             self.plot_grid_layout.addWidget(area.widget, r, c)
 
         for r in range(rows):
             self.plot_grid_layout.setRowStretch(r, 1)
-        self.plot_grid_layout.setColumnStretch(0, 1)
-        self.plot_grid_layout.setColumnStretch(1, 1)
+        for c in range(cols):
+            self.plot_grid_layout.setColumnStretch(c, 1)
 
     # -----------------------------
     # add/delete
@@ -892,7 +1020,7 @@ class CsvPlotPanel(QWidget):
         area.right_cols = self._selected_cols(self.y2_combos)
         logger.debug(f"[UI][Graph] new graph left_cols={area.left_cols}, right_cols={area.right_cols}")
         self._areas.append(area)
-        self._rebuild_plot_layout()
+        self._rebuild_plot_layout(force=True)
         self.plot()
 
     def delete_graph(self, area: PlotArea):
@@ -910,7 +1038,7 @@ class CsvPlotPanel(QWidget):
         self._areas.remove(area)
         area.widget.setParent(None)
         area.widget.deleteLater()
-        self._rebuild_plot_layout()
+        self._rebuild_plot_layout(force=True)
         self.plot()
 
     # -----------------------------
@@ -1414,7 +1542,7 @@ class CsvPlotPanel(QWidget):
             logger.debug("[UI][Dialog] y_columns canceled")
             return
 
-        selected = dlg.selected_items()[:3]
+        selected = dlg.selected_items()
         logger.info(f"[UI][Dialog] y_columns selected side={side}: {selected}")
 
         if area is not None:
@@ -1760,6 +1888,9 @@ class MainWindow(QMainWindow):
         self.move(geo.x() + int(geo.width() * 0.05), geo.y() + int(geo.height() * 0.05))
 
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setCollapsible(0, False)  # tree
+        splitter.setCollapsible(1, False)  # plot
 
         self.model = QFileSystemModel()
         self.model.setRootPath(str(self.root_dir))
@@ -1770,13 +1901,24 @@ class MainWindow(QMainWindow):
         self.tree = QTreeView()
         self.tree.setModel(self.model)
         self.tree.setRootIndex(self.model.index(str(self.root_dir)))
-        for col in range(1, self.model.columnCount()):
-            self.tree.hideColumn(col)
+
+        for col in range(self.model.columnCount()):
+            if col not in (0, 3):  # 0: Name, 3: Date Modified
+                self.tree.hideColumn(col)
+
         self.tree.setAnimated(True)
+
+        self.tree.setSortingEnabled(True)
+        self.tree.sortByColumn(3, Qt.AscendingOrder)
+
         self.tree.doubleClicked.connect(self.on_tree_double_clicked)
+        self.tree.setMinimumWidth(240)  # ✅ 트리 최소폭 확보 (원하면 200~280 조절)
+        self.tree.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         splitter.addWidget(self.tree)
 
         self.plot_panel = CsvPlotPanel(alarm_dir=self.alarm_dir)
+        self.plot_panel.setMinimumWidth(0)  # ✅ 플롯은 0까지 줄어들어도 됨
+        self.plot_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         splitter.addWidget(self.plot_panel)
 
         splitter.setStretchFactor(0, 2)
