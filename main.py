@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from PySide6.QtCore import Qt, QDir, QDateTime, QPoint, QPointF, QRect, QRectF, QMargins
+from PySide6.QtCore import Qt, QDir, QDateTime, QPoint, QPointF, QRect, QRectF, QMargins, QTimer
 from PySide6.QtGui import QPainter, QColor, QPen, QCursor, QBrush
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QLabel, QComboBox, QPushButton, QStackedWidget,
     QDateTimeEdit, QDoubleSpinBox, QMessageBox, QCheckBox,
     QDialog, QDialogButtonBox, QFormLayout, QListWidget, QListWidgetItem,
-    QAbstractItemView, QGridLayout, QToolTip, QRubberBand,
+    QAbstractItemView, QGridLayout, QRubberBand,
     QSizePolicy
 )
 
@@ -20,6 +20,7 @@ from PySide6.QtCharts import (
     QValueAxis, QDateTimeAxis
 )
 from PySide6.QtWidgets import QGraphicsLineItem, QGraphicsRectItem, QGraphicsEllipseItem
+
 
 # -----------------------------
 # logger fallback
@@ -39,16 +40,133 @@ NONE_ITEM = "(None)"
 
 
 # =========================================================
+# Sticky tooltip widget (custom)
+# =========================================================
+class StickyTip(QWidget):
+    """
+    QToolTip 대신 사용하는 커스텀 패널.
+    - 부모(view) 위에 떠있는 QLabel 패널
+    - target_hovering=True 이거나, tip 자체 hover 중이면 유지
+    - target_hovering=False 되고 tip도 hover 아님이면 hide(약간 딜레이)
+    """
+    def __init__(self, parent: QWidget, *, kind: str):
+        super().__init__(parent)
+        self.kind = kind
+
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)  # tip 자체 hover 감지
+        self.setMouseTracking(True)
+        self.setVisible(False)
+
+        self._hovering_tip = False
+        self._target_hovering = False
+
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(self._maybe_hide)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        self.lbl = QLabel("")
+        self.lbl.setWordWrap(True)
+        self.lbl.setTextFormat(Qt.PlainText)
+        self.lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+
+        # 스타일 (필요하면 여기만 조절)
+        if kind == "alarm":
+            self.lbl.setStyleSheet(
+                "QLabel{"
+                "background: rgba(90,20,20,230);"
+                "color: white;"
+                "border: 1px solid rgba(255,255,255,40);"
+                "border-radius: 8px;"
+                "padding: 8px 10px;"
+                "font-size: 11px;"
+                "}"
+            )
+        else:
+            self.lbl.setStyleSheet(
+                "QLabel{"
+                "background: rgba(25,25,25,220);"
+                "color: white;"
+                "border: 1px solid rgba(255,255,255,40);"
+                "border-radius: 8px;"
+                "padding: 8px 10px;"
+                "font-size: 11px;"
+                "}"
+            )
+
+        lay.addWidget(self.lbl)
+
+    def set_target_hovering(self, on: bool):
+        self._target_hovering = bool(on)
+        if on:
+            self._hide_timer.stop()
+        else:
+            # target에서 벗어날 때 바로 hide하지 말고 약간 유예(툴팁으로 이동 가능)
+            self._hide_timer.start(120)
+
+    def show_text_at(self, text: str, pos_in_parent: QPoint, *, offset: QPoint = QPoint(16, 16)):
+        if not text:
+            self.hide_tip()
+            return
+
+        self.lbl.setText(text)
+        self.lbl.adjustSize()
+        self.adjustSize()
+
+        x = pos_in_parent.x() + offset.x()
+        y = pos_in_parent.y() + offset.y()
+
+        # parent(view) 영역 밖으로 나가지 않게 clamp
+        pw = self.parentWidget().width()
+        ph = self.parentWidget().height()
+        w = self.width()
+        h = self.height()
+
+        if x + w > pw:
+            x = max(0, pw - w)
+        if y + h > ph:
+            y = max(0, ph - h)
+        if x < 0:
+            x = 0
+        if y < 0:
+            y = 0
+
+        self.move(x, y)
+        self.setVisible(True)
+        self.raise_()
+
+    def hide_tip(self):
+        self._hide_timer.stop()
+        self.setVisible(False)
+
+    def _maybe_hide(self):
+        # target hover도 아니고 tip 위 hover도 아니면 숨김
+        if (not self._target_hovering) and (not self._hovering_tip):
+            self.setVisible(False)
+
+    def enterEvent(self, e):
+        self._hovering_tip = True
+        self._hide_timer.stop()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hovering_tip = False
+        # tip에서 벗어났더라도 target hover면 유지
+        if not self._target_hovering:
+            self._hide_timer.start(120)
+        super().leaveEvent(e)
+
+
+# =========================================================
 # Dialogs
 # =========================================================
 class YScaleDialog(QDialog):
     """Left/Right Y 축 스케일 설정 다이얼로그 (Auto/Manual + Min/Max). Log UI는 유지하지만 적용 안함."""
-
     def __init__(self, title: str, mode: str, ymin: float, ymax: float, is_log: bool, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-
-        logger.debug(f"[UI][YScaleDialog] init title={title}, mode={mode}, ymin={ymin}, ymax={ymax}, is_log={is_log}")
 
         self.mode_cb = QComboBox()
         self.mode_cb.addItems(["Auto", "Manual"])
@@ -87,29 +205,24 @@ class YScaleDialog(QDialog):
 
     def _sync_enabled(self):
         manual = (self.mode_cb.currentText() == "Manual")
-        logger.debug(f"[UI][YScaleDialog] sync_enabled manual={manual}")
         self.ymin_sb.setEnabled(manual)
         self.ymax_sb.setEnabled(manual)
 
     def values(self):
-        v = (
+        return (
             self.mode_cb.currentText(),
             float(self.ymin_sb.value()),
             float(self.ymax_sb.value()),
             self.log_cb.currentText() == "Log",  # UI만
         )
-        logger.debug(f"[UI][YScaleDialog] values={v}")
-        return v
 
 
 class XRangeDialog(QDialog):
     """X 범위 설정 다이얼로그. datetime/numeric 둘 다 지원."""
-
     def __init__(self, is_datetime: bool, parent=None):
         super().__init__(parent)
         self.setWindowTitle("X Range")
         self.is_datetime = is_datetime
-        logger.debug(f"[UI][XRangeDialog] init is_datetime={is_datetime}")
 
         self.dt_start = QDateTimeEdit()
         self.dt_start.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
@@ -144,12 +257,6 @@ class XRangeDialog(QDialog):
         root.addWidget(btns)
 
     def set_dt_values(self, qmin: QDateTime, qmax: QDateTime, cur_start: QDateTime, cur_end: QDateTime):
-        logger.debug(
-            f"[UI][XRangeDialog] set_dt_values qmin={qmin.toString('yyyy-MM-dd HH:mm:ss')}, "
-            f"qmax={qmax.toString('yyyy-MM-dd HH:mm:ss')}, "
-            f"cur_start={cur_start.toString('yyyy-MM-dd HH:mm:ss')}, "
-            f"cur_end={cur_end.toString('yyyy-MM-dd HH:mm:ss')}"
-        )
         self.dt_start.setMinimumDateTime(qmin)
         self.dt_start.setMaximumDateTime(qmax)
         self.dt_end.setMinimumDateTime(qmin)
@@ -158,7 +265,6 @@ class XRangeDialog(QDialog):
         self.dt_end.setDateTime(cur_end)
 
     def set_num_values(self, xmin: float, xmax: float, cur_start: float, cur_end: float):
-        logger.debug(f"[UI][XRangeDialog] set_num_values xmin={xmin}, xmax={xmax}, cur_start={cur_start}, cur_end={cur_end}")
         self.num_start.setRange(xmin, xmax)
         self.num_end.setRange(xmin, xmax)
         self.num_start.setValue(cur_start)
@@ -166,24 +272,15 @@ class XRangeDialog(QDialog):
 
     def values(self):
         if self.is_datetime:
-            v = (self.dt_start.dateTime(), self.dt_end.dateTime())
-            logger.debug(
-                f"[UI][XRangeDialog] values datetime start={v[0].toString('yyyy-MM-dd HH:mm:ss')}, "
-                f"end={v[1].toString('yyyy-MM-dd HH:mm:ss')}"
-            )
-            return v
-        v = (float(self.num_start.value()), float(self.num_end.value()))
-        logger.debug(f"[UI][XRangeDialog] values numeric start={v[0]}, end={v[1]}")
-        return v
+            return (self.dt_start.dateTime(), self.dt_end.dateTime())
+        return (float(self.num_start.value()), float(self.num_end.value()))
 
 
 class YColumnsDialog(QDialog):
     """Y 축에 그릴 컬럼을 최대 3개까지 선택."""
-
     def __init__(self, title: str, items: list[str], selected: list[str], parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        logger.debug(f"[UI][YColumnsDialog] init title={title}, items={len(items)}, selected={selected}")
 
         self.listw = QListWidget()
         self.listw.setSelectionMode(QAbstractItemView.MultiSelection)
@@ -206,20 +303,12 @@ class YColumnsDialog(QDialog):
         root.addWidget(hint)
         root.addWidget(btns)
 
-    def _accept_checked(self):
-        picked = self.selected_items()
-        logger.debug(f"[UI][YColumnsDialog] accept_checked picked={picked}")
-        if len(picked) > 3:
-            QMessageBox.warning(self, "선택 오류", "최대 3개까지만 선택할 수 있습니다.")
-            return
-        self.accept()
-
     def selected_items(self) -> list[str]:
         return [i.text() for i in self.listw.selectedItems()]
 
 
 # =========================================================
-# TitleBar: 타이틀 클릭(좌/우) + 버튼(직관 UI)
+# TitleBar
 # =========================================================
 class TitleBar(QWidget):
     def __init__(self, on_pick_left, on_pick_right, parent=None):
@@ -235,7 +324,6 @@ class TitleBar(QWidget):
         self.lbl.setStyleSheet("font-weight:700;")
         self.lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
 
-        # ✅ 직관 버튼
         self.btn_left = QPushButton("L 요소…")
         self.btn_right = QPushButton("R 요소…")
         for b in (self.btn_left, self.btn_right):
@@ -263,27 +351,21 @@ class TitleBar(QWidget):
         self.setCursor(Qt.PointingHandCursor)
 
     def setText(self, t: str):
-        logger.debug(f"[UI][TitleBar] setText='{t}'")
         self.lbl.setText(t)
 
     def mousePressEvent(self, e):
-        # 타이틀 영역 클릭: 좌/우 반으로 판단해도 되고, 버튼도 있으니 유지
         if e.button() != Qt.LeftButton:
             return
-        # 버튼 위 클릭은 버튼이 처리
         if self.btn_left.geometry().contains(e.position().toPoint()) or self.btn_right.geometry().contains(e.position().toPoint()):
             return
         if e.position().x() < self.width() * 0.5:
-            logger.debug("[UI][TitleBar] click left-half -> pick_left")
             self._on_pick_left()
         else:
-            logger.debug("[UI][TitleBar] click right-half -> pick_right")
             self._on_pick_right()
 
 
 # =========================================================
-# Chart View: 밴드 하이라이트 + 축 클릭 다이얼로그 + 드래그줌 + crosshair
-# + 알람 halo(QGraphicsEllipseItem)  -> (C++ crash 회피)
+# Chart View
 # =========================================================
 class PowerChartView(QChartView):
     BAND = 14
@@ -298,12 +380,6 @@ class PowerChartView(QChartView):
         self.setMinimumSize(0, 0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        # (가능하면) 레전드가 최소폭 만들지 않게
-        try:
-            self.chart().legend().setAlignment(Qt.AlignBottom)
-        except Exception:
-            pass
-
         logger.debug("[UI][PowerChartView] init")
 
         # hover bands
@@ -316,7 +392,7 @@ class PowerChartView(QChartView):
             it.setBrush(QColor(0, 0, 0, 0))
             it.setVisible(False)
 
-        # crosshair
+        # crosshair lines
         self._vline = QGraphicsLineItem()
         self._hline = QGraphicsLineItem()
         for ln in (self._vline, self._hline):
@@ -324,17 +400,22 @@ class PowerChartView(QChartView):
             ln.setPen(QPen(QColor("gray"), 1))
             ln.setVisible(False)
 
-        # ✅ alarm halo (scene item)  -> series 조작 금지(크래시 회피)
+        # alarm halo (scene item)
         self._alarm_halo = QGraphicsEllipseItem()
         self._alarm_halo.setZValue(11)
         self._alarm_halo.setPen(QPen(QColor(255, 0, 0, 0), 0))
         self._alarm_halo.setBrush(QBrush(QColor(255, 0, 0, 60)))
         self._alarm_halo.setVisible(False)
 
+        # rubber band zoom
         self._rubber = QRubberBand(QRubberBand.Rectangle, self)
         self._dragging = False
         self._drag_start = QPoint()
         self._hover_kind: str | None = None
+
+        # ✅ custom tips
+        self.tip_cross = StickyTip(self, kind="cross")
+        self.tip_alarm = StickyTip(self, kind="alarm")
 
     def _ensure_scene_items(self):
         sc = self.chart().scene()
@@ -408,18 +489,16 @@ class PowerChartView(QChartView):
         self._hline.setLine(pa.left(), p_scene.y(), pa.right(), p_scene.y())
         self._hline.setVisible(True)
 
-    # ✅ 외부에서 halo 표시/숨김 호출
     def show_alarm_halo_at(self, series, point: QPointF, on: bool):
         self._ensure_scene_items()
         if not on or series is None:
             self._alarm_halo.setVisible(False)
             return
         try:
-            pos = self.chart().mapToPosition(point, series)  # QPointF (chart item coord)
+            pos = self.chart().mapToPosition(point, series)
         except Exception:
             self._alarm_halo.setVisible(False)
             return
-
         r = 14.0
         self._alarm_halo.setRect(QRectF(pos.x() - r, pos.y() - r, r * 2, r * 2))
         self._alarm_halo.setVisible(True)
@@ -439,23 +518,31 @@ class PowerChartView(QChartView):
 
         self._update_crosshair(e.position().toPoint())
 
+        # ✅ crosshair tip: plot 위 + 알람 hovering 아닐 때만 표시
         if self._plot_contains(e.position().toPoint()):
-            ref_series = self.area._ref_series_for_mapping()
-            if ref_series is not None:
-                pa = self.chart().plotArea()
-                p_scene = self.mapToScene(e.position().toPoint())
-                v = self.chart().mapToValue(QPointF(p_scene.x(), pa.center().y()), ref_series)
-                x = float(v.x())
-                self.area.show_crosshair_values(x, True)
+            self.tip_cross.set_target_hovering(True)
+
+            if self.area._alarm_hovering:
+                # 알람이 우선
+                self.tip_cross.hide_tip()
             else:
-                self.area.show_crosshair_values(0.0, False)
+                ref = self.area._ref_series_for_mapping()
+                if ref is not None:
+                    pa = self.chart().plotArea()
+                    p_scene = self.mapToScene(e.position().toPoint())
+                    v = self.chart().mapToValue(QPointF(p_scene.x(), pa.center().y()), ref)
+                    x = float(v.x())
+                    text = self.area.build_crosshair_text(x)
+                    self.tip_cross.show_text_at(text, e.position().toPoint(), offset=QPoint(16, 16))
+                else:
+                    self.tip_cross.hide_tip()
         else:
-            self.area.show_crosshair_values(0.0, False)
+            self.tip_cross.set_target_hovering(False)
 
         super().mouseMoveEvent(e)
 
     def leaveEvent(self, e):
-        self.area.show_crosshair_values(0.0, False)
+        self.tip_cross.set_target_hovering(False)
         super().leaveEvent(e)
 
     def mousePressEvent(self, e):
@@ -464,15 +551,12 @@ class PowerChartView(QChartView):
 
         kind = self._hit_kind(e.position().toPoint())
         if kind == "x_axis":
-            logger.debug("[UI][PowerChartView] x_axis band click -> open x range dialog")
             self.area.parent_panel._open_x_range_dialog()
             return
         if kind == "y_left":
-            logger.debug("[UI][PowerChartView] y_left band click -> open y scale dialog (left)")
             self.area.parent_panel._open_y_scale_dialog(side="left")
             return
         if kind == "y_right":
-            logger.debug("[UI][PowerChartView] y_right band click -> open y scale dialog (right)")
             self.area.parent_panel._open_y_scale_dialog(side="right")
             return
 
@@ -504,7 +588,6 @@ class PowerChartView(QChartView):
 
             ref_series = self.area._ref_series_for_mapping()
             if ref_series is None:
-                logger.debug("[UI][PowerChartView] zoom drag ignored (no ref series)")
                 return
 
             v0 = self.chart().mapToValue(QPointF(x0_scene, pa.center().y()), ref_series)
@@ -512,7 +595,6 @@ class PowerChartView(QChartView):
 
             xmin = float(min(v0.x(), v1.x()))
             xmax = float(max(v0.x(), v1.x()))
-            logger.debug(f"[UI][PowerChartView] zoom drag apply xmin={xmin}, xmax={xmax}")
             self.area.parent_panel._apply_zoom_from_chart(area=self.area, xmin=xmin, xmax=xmax)
             return
 
@@ -590,19 +672,16 @@ class PlotArea:
         self.alarm_series: QScatterSeries | None = None
         self._alarm_map: dict[int, tuple[str, str, str, str]] = {}  # ms -> (timeStr, text, stepNo, stepName)
 
-        logger.debug("[PLOT][PlotArea] created")
-
     def _find_nearest_y(self, series: QLineSeries, x: float) -> float | None:
         """series에서 x에 가장 가까운 점의 y를 반환. (x는 ms 또는 numeric)"""
         try:
-            pts = series.points()
+            pts = series.points()  # ✅ deprecated pointsVector() 안씀
         except Exception:
             return None
         n = len(pts)
         if n == 0:
             return None
 
-        # pts는 x 증가 순으로 들어있다고 가정 (현재 append 방식상 대부분 그렇다)
         lo, hi = 0, n - 1
         while lo < hi:
             mid = (lo + hi) // 2
@@ -612,32 +691,22 @@ class PlotArea:
                 hi = mid
 
         i = lo
-        # i 주변(왼쪽/오른쪽) 중 더 가까운 점 선택
         best = i
         if i > 0 and abs(pts[i - 1].x() - x) <= abs(pts[i].x() - x):
             best = i - 1
-
         return float(pts[best].y())
 
-    def show_crosshair_values(self, x: float, on: bool):
-        """현재 x 위치에서 left/right 모든 시리즈 값을 툴팁으로 표시"""
-        if not on:
-            QToolTip.hideText()
-            return
+    def build_crosshair_text(self, x: float) -> str:
+        if self._alarm_hovering:
+            return ""
 
         lines: list[str] = []
-
-        if self._alarm_hovering:
-            return
-
-        # X 표시
         if self.parent_panel.x_is_datetime:
             qdt = QDateTime.fromMSecsSinceEpoch(int(x))
             lines.append(qdt.toString("yyyy-MM-dd HH:mm:ss"))
         else:
             lines.append(f"X = {x:.6g}")
 
-        # Left series
         if self.left_series:
             lines.append("")
             lines.append("[Left]")
@@ -645,10 +714,8 @@ class PlotArea:
                 y = self._find_nearest_y(s, x)
                 if y is None:
                     continue
-                # s.name() = "L:컬럼명"
                 lines.append(f"{s.name()} = {y:.6g}")
 
-        # Right series
         if self.right_series:
             lines.append("")
             lines.append("[Right]")
@@ -658,10 +725,7 @@ class PlotArea:
                     continue
                 lines.append(f"{s.name()} = {y:.6g}")
 
-        msg = "\n".join(lines).strip()
-        if msg:
-            pos = QCursor.pos() + QPoint(18, 18)
-            QToolTip.showText(pos, msg, self.view)
+        return "\n".join(lines).strip()
 
     def _ref_series_for_mapping(self):
         if self.left_series:
@@ -673,23 +737,26 @@ class PlotArea:
         return None
 
     def clear(self):
-        logger.debug("[PLOT][PlotArea] clear")
-        # ✅ tooltip/halo 숨김 (hover 이벤트가 남아있어도 안전)
+        # ✅ custom tips hide
         try:
-            QToolTip.hideText()
+            self.view.tip_cross.hide_tip()
+            self.view.tip_alarm.hide_tip()
+            self.view.tip_cross.set_target_hovering(False)
+            self.view.tip_alarm.set_target_hovering(False)
         except Exception:
             pass
+
+        # halo hide
         try:
             self.view.show_alarm_halo_at(self.alarm_series, QPointF(), False)
         except Exception:
             pass
 
-        # ✅ hovered disconnect (C++ 크래시 방지)
+        # hovered disconnect
         try:
             if self.alarm_series is not None:
                 try:
                     self.alarm_series.hovered.disconnect(self.on_alarm_hovered)
-                    logger.debug("[PLOT][Alarm] hovered disconnected")
                 except Exception:
                     pass
         except Exception:
@@ -699,7 +766,6 @@ class PlotArea:
         self.left_series.clear()
         self.right_series.clear()
 
-        # axes 제거/초기화
         for ax in (self.axis_x_dt, self.axis_x_num, self.axis_y_left, self.axis_y_right):
             if ax is not None:
                 try:
@@ -714,29 +780,14 @@ class PlotArea:
 
         self.alarm_series = None
         self._alarm_map.clear()
+        self._alarm_hovering = False
 
         self.titlebar.setText("—")
 
-    # ✅ 고정 메서드 슬롯 (closure 지양)
-    def on_alarm_hovered(self, point: QPointF, state: bool):
-        # series가 사라졌는데 신호가 들어오는 케이스 가드
-        if self.alarm_series is None:
-            return
-
-        self._alarm_hovering = bool(state)
-
-        # halo(씬 아이템) 표시/숨김
-        self.view.show_alarm_halo_at(self.alarm_series, point, state)
-
-        if not state:
-            QToolTip.hideText()
-            return
-
-        key = int(round(point.x()))
-        info = self._alarm_map.get(key)
+    def _alarm_text_from_key(self, key_ms: int) -> str:
+        info = self._alarm_map.get(key_ms)
         if not info:
-            return
-
+            return ""
         time_str, txt, step_no, step_name = info
         lines = [time_str]
         if step_no or step_name:
@@ -748,9 +799,40 @@ class PlotArea:
                 lines.append(f"Step: {step_name}")
         if txt:
             lines.append(txt)
+        return "\n".join(lines).strip()
 
-        msg = "\n".join(lines)
-        QToolTip.showText(QCursor.pos(), msg, self.view)
+    def on_alarm_hovered(self, point: QPointF, state: bool):
+        if self.alarm_series is None:
+            return
+
+        self._alarm_hovering = bool(state)
+
+        # halo
+        self.view.show_alarm_halo_at(self.alarm_series, point, state)
+
+        if state:
+            # crosshair tip은 가림
+            self.view.tip_cross.hide_tip()
+
+            # 알람 tip 표시
+            key = int(round(point.x()))
+            msg = self._alarm_text_from_key(key)
+            if msg:
+                try:
+                    pos_scene = self.view.chart().mapToPosition(point, self.alarm_series)  # chart item coord
+                    pos_view = self.view.mapFromScene(pos_scene.toPoint())
+                except Exception:
+                    pos_view = QPoint(self.view.width() // 2, self.view.height() // 2)
+
+                self.view.tip_alarm.set_target_hovering(True)
+                # 알람은 위로 뜨게(겹침 최소화)
+                self.view.tip_alarm.show_text_at(msg, pos_view, offset=QPoint(18, -10))
+            else:
+                self.view.tip_alarm.hide_tip()
+                self.view.tip_alarm.set_target_hovering(False)
+        else:
+            # 알람에서 벗어나면 (툴팁으로 이동 가능하도록) target_hovering false
+            self.view.tip_alarm.set_target_hovering(False)
 
 
 # =========================================================
@@ -772,14 +854,11 @@ class CsvPlotPanel(QWidget):
         self._step_name_col: str | None = None
 
         self._areas: list[PlotArea] = []
-
         self._last_cols: int | None = None
 
-        logger.info(f"[MAIN] CsvPlotPanel init alarm_dir={self.alarm_dir}")
         self._build_ui()
 
     def _build_ui(self):
-        logger.debug("[UI][CsvPlotPanel] build_ui")
         root = QVBoxLayout(self)
 
         title_row = QHBoxLayout()
@@ -795,7 +874,7 @@ class CsvPlotPanel(QWidget):
 
         root.addLayout(title_row)
 
-        # 숨김 컨트롤(상태 유지용)
+        # hidden controls
         self.ctrl_widget = QWidget()
         ctrl_layout = QVBoxLayout(self.ctrl_widget)
         ctrl_layout.setContentsMargins(0, 0, 0, 0)
@@ -947,7 +1026,7 @@ class CsvPlotPanel(QWidget):
 
         a0 = PlotArea(self)
         self._areas.append(a0)
-        self._rebuild_plot_layout()
+        self._rebuild_plot_layout(force=True)
 
         self.status = QLabel("")
         self.status.setStyleSheet("color: gray;")
@@ -955,10 +1034,8 @@ class CsvPlotPanel(QWidget):
 
     def _desired_cols(self) -> int:
         n = len(self._areas)
-
         if n <= 1:
             return 1
-
         return 1 if self.width() < 1100 else 2
 
     def resizeEvent(self, e):
@@ -967,11 +1044,7 @@ class CsvPlotPanel(QWidget):
         if cols != self._last_cols:
             self._rebuild_plot_layout(force=True)
 
-    # -----------------------------
-    # layout
-    # -----------------------------
     def _clear_grid_layout(self):
-        logger.debug("[UI][Layout] clear_grid_layout")
         while self.plot_grid_layout.count():
             item = self.plot_grid_layout.takeAt(0)
             w = item.widget()
@@ -987,18 +1060,15 @@ class CsvPlotPanel(QWidget):
             return
         self._last_cols = cols
 
-        logger.debug(f"[UI][Layout] rebuild_plot_layout graphs={n}, cols={cols}")
         self._clear_grid_layout()
         if n == 0:
             return
 
-        # stretch 초기화
         for r in range(50):
             self.plot_grid_layout.setRowStretch(r, 0)
         for c in range(5):
             self.plot_grid_layout.setColumnStretch(c, 0)
 
-        # 배치
         rows = (n + cols - 1) // cols
         for i, area in enumerate(self._areas):
             r = i // cols
@@ -1010,23 +1080,16 @@ class CsvPlotPanel(QWidget):
         for c in range(cols):
             self.plot_grid_layout.setColumnStretch(c, 1)
 
-    # -----------------------------
-    # add/delete
-    # -----------------------------
     def add_graph(self):
-        logger.info("[UI][Graph] add_graph")
         area = PlotArea(self)
         area.left_cols = self._selected_cols(self.y_combos)
         area.right_cols = self._selected_cols(self.y2_combos)
-        logger.debug(f"[UI][Graph] new graph left_cols={area.left_cols}, right_cols={area.right_cols}")
         self._areas.append(area)
         self._rebuild_plot_layout(force=True)
         self.plot()
 
     def delete_graph(self, area: PlotArea):
-        logger.info("[UI][Graph] delete_graph")
         if area not in self._areas:
-            logger.debug("[UI][Graph] delete_graph ignored (not in list)")
             return
         if len(self._areas) <= 1:
             QMessageBox.information(self, "삭제 불가", "최소 1개 그래프는 유지됩니다.")
@@ -1041,9 +1104,6 @@ class CsvPlotPanel(QWidget):
         self._rebuild_plot_layout(force=True)
         self.plot()
 
-    # -----------------------------
-    # utils
-    # -----------------------------
     @staticmethod
     def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
@@ -1056,7 +1116,6 @@ class CsvPlotPanel(QWidget):
         return df
 
     def _set_combos_items(self, combos: list[QComboBox], items: list[str]):
-        logger.debug(f"[UI][Combos] set items count={len(items)}")
         for cb in combos:
             cb.blockSignals(True)
             cb.clear()
@@ -1089,13 +1148,7 @@ class CsvPlotPanel(QWidget):
         self.right_ymin.setEnabled(right_manual and self.right_scale_mode.isEnabled())
         self.right_ymax.setEnabled(right_manual and self.right_scale_mode.isEnabled())
 
-        logger.debug(
-            f"[UI][Scale] enable_state left_mode={self.left_scale_mode.currentText()}, "
-            f"right_mode={self.right_scale_mode.currentText()}"
-        )
-
     def reset_left_scale(self):
-        logger.info("[UI][Scale] reset_left_scale")
         self.left_scale_mode.setCurrentText("Auto")
         self.left_log.setChecked(False)
         self.left_ymin.setValue(0.0)
@@ -1104,7 +1157,6 @@ class CsvPlotPanel(QWidget):
         self.plot()
 
     def reset_right_scale(self):
-        logger.info("[UI][Scale] reset_right_scale")
         self.right_scale_mode.setCurrentText("Auto")
         self.right_log.setChecked(False)
         self.right_ymin.setValue(0.0)
@@ -1113,22 +1165,17 @@ class CsvPlotPanel(QWidget):
         self.plot()
 
     def clear_left(self):
-        logger.info("[UI][Y] clear_left")
         for cb in self.y_combos:
             cb.setCurrentText(NONE_ITEM)
         self.status.setText("Left(Y) 선택 해제")
         self.plot()
 
     def clear_right(self):
-        logger.info("[UI][Y] clear_right")
         for cb in self.y2_combos:
             cb.setCurrentText(NONE_ITEM)
         self.status.setText("Right(Y2) 선택 해제")
         self.plot()
 
-    # -----------------------------
-    # Step detect
-    # -----------------------------
     def _detect_step_columns(self):
         self._step_no_col = None
         self._step_name_col = None
@@ -1165,7 +1212,6 @@ class CsvPlotPanel(QWidget):
             "step name", "stepname", "step desc", "stepdesc", "step description",
             "recipe step name", "recipestepname",
         ])
-        logger.info(f"[STEP] step_no_col={self._step_no_col}, step_name_col={self._step_name_col}")
 
     def _step_info_at(self, t: pd.Timestamp) -> tuple[str | None, str | None]:
         if self.df is None or "_x" not in self.df.columns or not self.x_is_datetime:
@@ -1220,35 +1266,29 @@ class CsvPlotPanel(QWidget):
         path = Path(path)
         self.csv_path = path
         self.title.setText(f"선택된 CSV: {path}")
-        logger.info(f"[MAIN] Load CSV: {path}")
 
         try:
             df = pd.read_csv(path)
             if df.empty:
                 raise ValueError("CSV가 비어 있습니다.")
         except Exception as e:
-            logger.exception(f"[MAIN] CSV 로드 실패: {path}")
             QMessageBox.critical(self, "CSV 로드 실패", f"{e}")
             return
 
         df = self._normalize_columns(df)
         self.df = df
-        logger.debug(f"[MAIN] columns={list(df.columns)}")
-
         self._detect_step_columns()
 
         self.x_col = df.columns[0]
         x_series = df[self.x_col]
         x_dt = pd.to_datetime(x_series, errors="coerce")
         valid_dt = int(x_dt.notna().sum())
-        logger.debug(f"[MAIN] X col='{self.x_col}', datetime_valid={valid_dt}/{len(x_series)}")
 
         if valid_dt > 0 and valid_dt >= int(len(x_series) * 0.8):
             self.x_is_datetime = True
             df["_x"] = x_dt
             self._setup_x_range_datetime(df["_x"])
             self.range_stack.setCurrentWidget(self.dt_widget)
-            logger.info("[MAIN] X axis = datetime")
         else:
             self.x_is_datetime = False
             x_num = pd.to_numeric(x_series, errors="coerce")
@@ -1256,11 +1296,9 @@ class CsvPlotPanel(QWidget):
                 df["_x"] = range(len(df))
                 self.x_col = "(index)"
                 self._setup_x_range_numeric(df["_x"])
-                logger.info("[MAIN] X axis = index")
             else:
                 df["_x"] = x_num
                 self._setup_x_range_numeric(df["_x"])
-                logger.info("[MAIN] X axis = numeric")
             self.range_stack.setCurrentWidget(self.num_widget)
 
         y_candidates: list[str] = []
@@ -1272,7 +1310,6 @@ class CsvPlotPanel(QWidget):
                 y_candidates.append(c)
 
         self._y_candidates = y_candidates[:]
-        logger.info(f"[MAIN] y_candidates={len(self._y_candidates)}")
         self._set_combos_items(self.y_combos, y_candidates)
         self._set_combos_items(self.y2_combos, y_candidates)
 
@@ -1301,7 +1338,6 @@ class CsvPlotPanel(QWidget):
             self._clear_plot_all()
             return
 
-        # 전역 기본값
         self.y_combos[0].setCurrentIndex(1)
 
         default_left = self._selected_cols(self.y_combos)
@@ -1317,7 +1353,6 @@ class CsvPlotPanel(QWidget):
             now = QDateTime.currentDateTime()
             self.dt_start.setDateTime(now)
             self.dt_end.setDateTime(now)
-            logger.warning("[MAIN] x_dt empty -> set now")
             return
         xmin = x_valid.min()
         xmax = x_valid.max()
@@ -1329,10 +1364,6 @@ class CsvPlotPanel(QWidget):
         self.dt_start.setMaximumDateTime(qmax)
         self.dt_end.setMinimumDateTime(qmin)
         self.dt_end.setMaximumDateTime(qmax)
-        logger.debug(
-            f"[MAIN] x_range datetime qmin={qmin.toString('yyyy-MM-dd HH:mm:ss')}, "
-            f"qmax={qmax.toString('yyyy-MM-dd HH:mm:ss')}"
-        )
 
     def _setup_x_range_numeric(self, x_num: pd.Series):
         x_valid = pd.to_numeric(x_num, errors="coerce").dropna()
@@ -1341,7 +1372,6 @@ class CsvPlotPanel(QWidget):
             self.num_end.setRange(0, 0)
             self.num_start.setValue(0)
             self.num_end.setValue(0)
-            logger.warning("[MAIN] x_num empty -> set 0..0")
             return
         xmin = float(x_valid.min())
         xmax = float(x_valid.max())
@@ -1349,16 +1379,12 @@ class CsvPlotPanel(QWidget):
         self.num_end.setRange(xmin, xmax)
         self.num_start.setValue(xmin)
         self.num_end.setValue(xmax)
-        logger.debug(f"[MAIN] x_range numeric xmin={xmin}, xmax={xmax}")
 
     def _clear_plot_all(self):
-        logger.debug("[PLOT] clear_plot_all")
         for a in self._areas:
             a.clear()
 
-    # -----------------------------
     # Alarm helpers
-    # -----------------------------
     def _get_alarm_date_yyMMdd(self) -> str | None:
         if self.df is None or "_x" not in self.df.columns:
             return None
@@ -1385,33 +1411,26 @@ class CsvPlotPanel(QWidget):
             return None
         tube_id = int(s.iloc[0])
         suffix = abs(tube_id) % 10
-        unit = f"TUBE{suffix:02d}"
-        logger.debug(f"[ALARM] target_tube from {tube_col}={tube_id} -> {unit}")
-        return unit
+        return f"TUBE{suffix:02d}"
 
     def _load_alarm_events(self) -> pd.DataFrame | None:
         yyMMdd = self._get_alarm_date_yyMMdd()
         if yyMMdd is None:
-            logger.debug("[ALARM] yyMMdd not available")
             return None
         alarm_path = self.alarm_dir / f"Alarm_{yyMMdd}.csv"
         if not alarm_path.exists():
-            logger.debug(f"[ALARM] file not found: {alarm_path}")
             return None
 
-        logger.info(f"[ALARM] load {alarm_path}")
         try:
             adf = pd.read_csv(alarm_path)
             if adf.empty:
                 return None
         except Exception:
-            logger.exception(f"[ALARM] Alarm load failed: {alarm_path}")
             return None
 
         adf = self._normalize_columns(adf)
         required = {"Time", "UnitID", "Set", "Text"}
         if not required.issubset(set(adf.columns)):
-            logger.error(f"[ALARM] Missing columns. need={required}, got={set(adf.columns)}")
             return None
 
         adf["_t"] = pd.to_datetime(adf["Time"], errors="coerce")
@@ -1428,18 +1447,13 @@ class CsvPlotPanel(QWidget):
 
         filtered = adf.loc[unit_ok & set_ok, ["_t", "Text"]].copy()
         if filtered.empty:
-            logger.debug("[ALARM] filtered empty")
             return None
         filtered["Text"] = filtered["Text"].astype(str).fillna("")
         filtered = filtered.sort_values("_t")
-        logger.info(f"[ALARM] filtered events={len(filtered)}")
         return filtered
 
-    # -----------------------------
     # Dialog openers
-    # -----------------------------
     def _open_y_scale_dialog(self, side: str):
-        logger.debug(f"[UI][Dialog] open_y_scale_dialog side={side}")
         if side == "left":
             dlg = YScaleDialog(
                 title="Left Y Scale",
@@ -1460,7 +1474,6 @@ class CsvPlotPanel(QWidget):
             )
 
         if dlg.exec() != QDialog.Accepted:
-            logger.debug("[UI][Dialog] y_scale canceled")
             return
 
         mode, ymin, ymax, is_log = dlg.values()
@@ -1482,7 +1495,6 @@ class CsvPlotPanel(QWidget):
         self.plot()
 
     def _open_x_range_dialog(self):
-        logger.debug("[UI][Dialog] open_x_range_dialog")
         if self.df is None or "_x" not in self.df.columns:
             return
 
@@ -1506,7 +1518,6 @@ class CsvPlotPanel(QWidget):
             dlg.set_num_values(xmin, xmax, float(self.num_start.value()), float(self.num_end.value()))
 
         if dlg.exec() != QDialog.Accepted:
-            logger.debug("[UI][Dialog] x_range canceled")
             return
 
         v0, v1 = dlg.values()
@@ -1517,7 +1528,6 @@ class CsvPlotPanel(QWidget):
             self.num_start.setValue(float(v0))
             self.num_end.setValue(float(v1))
 
-        logger.info("[UI][Dialog] x_range applied -> replot")
         self.plot()
 
     def _open_y_columns_dialog(self, side: str, area: PlotArea | None = None):
@@ -1531,7 +1541,6 @@ class CsvPlotPanel(QWidget):
         else:
             cur = self._selected_cols(self.y_combos if side == "left" else self.y2_combos)
 
-        logger.debug(f"[UI][Dialog] open_y_columns_dialog side={side}, cur={cur}")
         dlg = YColumnsDialog(
             title=f"{side.upper()} Y Columns",
             items=items,
@@ -1539,11 +1548,9 @@ class CsvPlotPanel(QWidget):
             parent=self,
         )
         if dlg.exec() != QDialog.Accepted:
-            logger.debug("[UI][Dialog] y_columns canceled")
             return
 
         selected = dlg.selected_items()
-        logger.info(f"[UI][Dialog] y_columns selected side={side}: {selected}")
 
         if area is not None:
             if side == "left":
@@ -1557,9 +1564,6 @@ class CsvPlotPanel(QWidget):
 
         self.plot()
 
-    # -----------------------------
-    # color helper
-    # -----------------------------
     @staticmethod
     def _unique_color_generator():
         base = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
@@ -1574,13 +1578,9 @@ class CsvPlotPanel(QWidget):
                 yield QColor.fromHsvF(hue, 0.55, 0.85).name()
             i += 1
 
-    # -----------------------------
-    # zoom apply
-    # -----------------------------
     def _apply_zoom_from_chart(self, area: PlotArea, xmin: float, xmax: float):
         if xmin > xmax:
             xmin, xmax = xmax, xmin
-        logger.info(f"[PLOT][Zoom] apply xmin={xmin}, xmax={xmax}, datetime={self.x_is_datetime}")
         if self.x_is_datetime:
             q0 = QDateTime.fromMSecsSinceEpoch(int(xmin))
             q1 = QDateTime.fromMSecsSinceEpoch(int(xmax))
@@ -1591,9 +1591,6 @@ class CsvPlotPanel(QWidget):
             self.num_end.setValue(float(xmax))
         self.plot()
 
-    # -----------------------------
-    # minmax helper
-    # -----------------------------
     @staticmethod
     def _finite_minmax(series: pd.Series) -> tuple[float | None, float | None]:
         s = pd.to_numeric(series, errors="coerce").dropna()
@@ -1606,33 +1603,26 @@ class CsvPlotPanel(QWidget):
     # -----------------------------
     def plot(self):
         if self.df is None or self.csv_path is None:
-            logger.debug("[PLOT] plot ignored (no df/csv)")
             return
         df0 = self.df
         if "_x" not in df0.columns:
             self.status.setText("내부 x축 컬럼(_x)이 없습니다. CSV를 다시 로드해주세요.")
-            logger.error("[PLOT] missing _x")
             return
-
-        logger.debug(f"[PLOT] start graphs={len(self._areas)}")
 
         df = df0.copy()
         if self.x_is_datetime:
             start = pd.Timestamp(self.dt_start.dateTime().toPython())
             end = pd.Timestamp(self.dt_end.dateTime().toPython())
             df = df[df["_x"].between(start, end, inclusive="both")]
-            logger.debug(f"[PLOT] x_filter datetime start={start}, end={end}, rows={len(df)}")
         else:
             start = float(self.num_start.value())
             end = float(self.num_end.value())
             if start > end:
                 start, end = end, start
             df = df[df["_x"].between(start, end, inclusive="both")]
-            logger.debug(f"[PLOT] x_filter numeric start={start}, end={end}, rows={len(df)}")
 
         if df.empty:
             self.status.setText("선택한 X 범위에 데이터가 없습니다.")
-            logger.warning("[PLOT] empty after x filter")
             self._clear_plot_all()
             return
 
@@ -1655,7 +1645,6 @@ class CsvPlotPanel(QWidget):
         df = df.dropna(subset=["_x"], how="any")
         if df.empty:
             self.status.setText("유효한 데이터가 없습니다 (NaN 제거 후)")
-            logger.warning("[PLOT] empty after _x dropna")
             self._clear_plot_all()
             return
 
@@ -1664,18 +1653,14 @@ class CsvPlotPanel(QWidget):
             start_ev = pd.Timestamp(self.dt_start.dateTime().toPython())
             end_ev = pd.Timestamp(self.dt_end.dateTime().toPython())
             events = events[events["_t"].between(start_ev, end_ev, inclusive="both")]
-            logger.debug(f"[ALARM] range-filtered events={len(events)}")
         else:
             events = None
 
         for idx, area in enumerate(self._areas):
-            logger.debug(f"[PLOT] area[{idx}] render")
             area.clear()
 
             left_cols = [c for c in area.left_cols if c in df.columns]
             right_cols = [c for c in area.right_cols if c in df.columns]
-
-            logger.debug(f"[PLOT] area[{idx}] left_cols={left_cols}, right_cols={right_cols}")
 
             area.titlebar.setText(self.csv_path.name)
 
@@ -1687,7 +1672,6 @@ class CsvPlotPanel(QWidget):
             dfa = df.loc[:, sub_cols].copy()
             dfa = dfa.dropna(subset=["_x"] + left_cols + right_cols, how="any")
             if dfa.empty:
-                logger.debug(f"[PLOT] area[{idx}] skip (dfa empty)")
                 continue
 
             chart = area.chart
@@ -1698,14 +1682,14 @@ class CsvPlotPanel(QWidget):
             if self.x_is_datetime:
                 ax_x = QDateTimeAxis()
                 ax_x.setFormat("MM-dd HH:mm")
-                ax_x.setTitleText("")  # ✅ 축 타이틀 숨김
+                ax_x.setTitleText("")
                 ax_x.setTickCount(6)
                 ax_x.setRange(self.dt_start.dateTime(), self.dt_end.dateTime())
                 area.axis_x_dt = ax_x
                 chart.addAxis(ax_x, Qt.AlignBottom)
             else:
                 ax_x = QValueAxis()
-                ax_x.setTitleText("")  # ✅ 축 타이틀 숨김
+                ax_x.setTitleText("")
                 x0 = float(self.num_start.value())
                 x1 = float(self.num_end.value())
                 if x0 > x1:
@@ -1716,13 +1700,13 @@ class CsvPlotPanel(QWidget):
                 chart.addAxis(ax_x, Qt.AlignBottom)
 
             ax_l = QValueAxis()
-            ax_l.setTitleText("")  # ✅ Left 타이틀 숨김
+            ax_l.setTitleText("")
             ax_l.setTickCount(6)
             area.axis_y_left = ax_l
             chart.addAxis(ax_l, Qt.AlignLeft)
 
             ax_r = QValueAxis()
-            ax_r.setTitleText("")  # ✅ Right 타이틀 숨김
+            ax_r.setTitleText("")
             ax_r.setTickCount(6)
             area.axis_y_right = ax_r
             chart.addAxis(ax_r, Qt.AlignRight)
@@ -1814,7 +1798,6 @@ class CsvPlotPanel(QWidget):
                     if ymin > ymax:
                         ymin, ymax = ymax, ymin
                     ax_l.setRange(ymin, ymax)
-                    logger.debug(f"[PLOT] manual left y range={ymin}..{ymax}")
 
             if self.right_scale_mode.currentText() == "Manual":
                 ymin = float(self.right_ymin.value())
@@ -1823,7 +1806,6 @@ class CsvPlotPanel(QWidget):
                     if ymin > ymax:
                         ymin, ymax = ymax, ymin
                     ax_r.setRange(ymin, ymax)
-                    logger.debug(f"[PLOT] manual right y range={ymin}..{ymax}")
 
             # alarms
             if events is not None and not events.empty and self.x_is_datetime:
@@ -1858,14 +1840,12 @@ class CsvPlotPanel(QWidget):
                     )
 
                 alarm.hovered.connect(area.on_alarm_hovered)
-                logger.debug(f"[ALARM] area[{idx}] markers={len(area._alarm_map)}")
 
             area.view._layout_bands()
 
         self.status.setText(
             f"표시 중: {len(df)} rows | Graphs={len(self._areas)} | (Title/L·R 버튼=요소, X click=range, X drag=zoom, Y band=scale)"
         )
-        logger.debug("[PLOT] done")
 
 
 # =========================================================
@@ -1878,8 +1858,6 @@ class MainWindow(QMainWindow):
         self.alarm_dir = Path(alarm_dir).resolve()
         self.setWindowTitle("병곤이가만듦")
 
-        logger.info(f"[APP] MainWindow init root_dir={self.root_dir}, alarm_dir={self.alarm_dir}")
-
         screen = QApplication.primaryScreen()
         geo = screen.availableGeometry()
         w = int(geo.width() * 0.90)
@@ -1889,8 +1867,8 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
-        splitter.setCollapsible(0, False)  # tree
-        splitter.setCollapsible(1, False)  # plot
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
 
         self.model = QFileSystemModel()
         self.model.setRootPath(str(self.root_dir))
@@ -1907,17 +1885,15 @@ class MainWindow(QMainWindow):
                 self.tree.hideColumn(col)
 
         self.tree.setAnimated(True)
-
         self.tree.setSortingEnabled(True)
-        self.tree.sortByColumn(3, Qt.AscendingOrder)
-
+        self.tree.sortByColumn(3, Qt.AscendingOrder)  # 시간순
         self.tree.doubleClicked.connect(self.on_tree_double_clicked)
-        self.tree.setMinimumWidth(240)  # ✅ 트리 최소폭 확보 (원하면 200~280 조절)
+        self.tree.setMinimumWidth(240)
         self.tree.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         splitter.addWidget(self.tree)
 
         self.plot_panel = CsvPlotPanel(alarm_dir=self.alarm_dir)
-        self.plot_panel.setMinimumWidth(0)  # ✅ 플롯은 0까지 줄어들어도 됨
+        self.plot_panel.setMinimumWidth(0)
         self.plot_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         splitter.addWidget(self.plot_panel)
 
@@ -1925,18 +1901,13 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 6)
         self.setCentralWidget(splitter)
 
-        logger.info(f"[APP] ready")
-
     def on_tree_double_clicked(self, index):
         path = Path(self.model.filePath(index))
-        logger.debug(f"[UI][Tree] double_clicked path={path}")
         if path.is_dir():
             if self.tree.isExpanded(index):
                 self.tree.collapse(index)
-                logger.debug("[UI][Tree] collapse")
             else:
                 self.tree.expand(index)
-                logger.debug("[UI][Tree] expand")
             return
         self.plot_panel.load_csv(path)
 
