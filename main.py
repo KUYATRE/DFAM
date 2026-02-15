@@ -53,7 +53,7 @@ class StickyTip(QWidget):
         super().__init__(parent)
         self.kind = kind
 
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)  # tip 자체 hover 감지
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)  # tip 자체 hover 감지
         self.setMouseTracking(True)
         self.setVisible(False)
 
