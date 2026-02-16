@@ -103,7 +103,6 @@ class StickyTip(QWidget):
         if on:
             self._hide_timer.stop()
         else:
-            # target에서 벗어날 때 바로 hide하지 말고 약간 유예(툴팁으로 이동 가능)
             self._hide_timer.start(120)
 
     def show_text_at(self, text: str, pos_in_parent: QPoint, *, offset: QPoint = QPoint(16, 16)):
@@ -142,7 +141,6 @@ class StickyTip(QWidget):
         self.setVisible(False)
 
     def _maybe_hide(self):
-        # target hover도 아니고 tip 위 hover도 아니면 숨김
         if (not self._target_hovering) and (not self._hovering_tip):
             self.setVisible(False)
 
@@ -153,7 +151,6 @@ class StickyTip(QWidget):
 
     def leaveEvent(self, e):
         self._hovering_tip = False
-        # tip에서 벗어났더라도 target hover면 유지
         if not self._target_hovering:
             self._hide_timer.start(120)
         super().leaveEvent(e)
@@ -291,7 +288,7 @@ class YColumnsDialog(QDialog):
             item.setSelected(it in sel_set)
             self.listw.addItem(item)
 
-        hint = QLabel("여러개 선택 가능합니다.")
+        hint = QLabel("You can choose columns you want to plot on the Y axis.")
         hint.setStyleSheet("color: gray;")
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -324,8 +321,8 @@ class TitleBar(QWidget):
         self.lbl.setStyleSheet("font-weight:700;")
         self.lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
 
-        self.btn_left = QPushButton("L 요소…")
-        self.btn_right = QPushButton("R 요소…")
+        self.btn_left = QPushButton("Main Y components")
+        self.btn_right = QPushButton("Sub Y components")
         for b in (self.btn_left, self.btn_right):
             b.setCursor(Qt.PointingHandCursor)
             b.setFixedHeight(24)
@@ -523,7 +520,6 @@ class PowerChartView(QChartView):
             self.tip_cross.set_target_hovering(True)
 
             if self.area._alarm_hovering:
-                # 알람이 우선
                 self.tip_cross.hide_tip()
             else:
                 ref = self.area._ref_series_for_mapping()
@@ -673,9 +669,8 @@ class PlotArea:
         self._alarm_map: dict[int, tuple[str, str, str, str]] = {}  # ms -> (timeStr, text, stepNo, stepName)
 
     def _find_nearest_y(self, series: QLineSeries, x: float) -> float | None:
-        """series에서 x에 가장 가까운 점의 y를 반환. (x는 ms 또는 numeric)"""
         try:
-            pts = series.points()  # ✅ deprecated pointsVector() 안씀
+            pts = series.points()
         except Exception:
             return None
         n = len(pts)
@@ -737,7 +732,6 @@ class PlotArea:
         return None
 
     def clear(self):
-        # ✅ custom tips hide
         try:
             self.view.tip_cross.hide_tip()
             self.view.tip_alarm.hide_tip()
@@ -746,13 +740,11 @@ class PlotArea:
         except Exception:
             pass
 
-        # halo hide
         try:
             self.view.show_alarm_halo_at(self.alarm_series, QPointF(), False)
         except Exception:
             pass
 
-        # hovered disconnect
         try:
             if self.alarm_series is not None:
                 try:
@@ -807,31 +799,26 @@ class PlotArea:
 
         self._alarm_hovering = bool(state)
 
-        # halo
         self.view.show_alarm_halo_at(self.alarm_series, point, state)
 
         if state:
-            # crosshair tip은 가림
             self.view.tip_cross.hide_tip()
 
-            # 알람 tip 표시
             key = int(round(point.x()))
             msg = self._alarm_text_from_key(key)
             if msg:
                 try:
-                    pos_scene = self.view.chart().mapToPosition(point, self.alarm_series)  # chart item coord
+                    pos_scene = self.view.chart().mapToPosition(point, self.alarm_series)
                     pos_view = self.view.mapFromScene(pos_scene.toPoint())
                 except Exception:
                     pos_view = QPoint(self.view.width() // 2, self.view.height() // 2)
 
                 self.view.tip_alarm.set_target_hovering(True)
-                # 알람은 위로 뜨게(겹침 최소화)
                 self.view.tip_alarm.show_text_at(msg, pos_view, offset=QPoint(18, -10))
             else:
                 self.view.tip_alarm.hide_tip()
                 self.view.tip_alarm.set_target_hovering(False)
         else:
-            # 알람에서 벗어나면 (툴팁으로 이동 가능하도록) target_hovering false
             self.view.tip_alarm.set_target_hovering(False)
 
 
@@ -856,19 +843,34 @@ class CsvPlotPanel(QWidget):
         self._areas: list[PlotArea] = []
         self._last_cols: int | None = None
 
+        # ✅ 줌 최소 범위 (datetime: ms, numeric: units)
+        self._min_zoom_span: float = 0.0
+        # ✅ 전체 X 범위 저장 (Reset Zoom 용)
+        self._full_x_min_dt: QDateTime | None = None
+        self._full_x_max_dt: QDateTime | None = None
+        self._full_x_min_num: float | None = None
+        self._full_x_max_num: float | None = None
+
         self._build_ui()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
 
         title_row = QHBoxLayout()
-        self.title = QLabel("CSV를 선택하세요.")
+        self.title = QLabel("Choose CSV File to Plot")
         self.title.setStyleSheet("font-weight: 700;")
         title_row.addWidget(self.title, 1)
 
+        # ✅ Reset Zoom 버튼 추가
+        self.btn_reset_zoom = QPushButton("Reset Zoom")
+        self.btn_reset_zoom.setEnabled(False)
+        self.btn_reset_zoom.setToolTip("Reset Zoom (X Axis) to full scale")
+        self.btn_reset_zoom.clicked.connect(self.reset_zoom)
+        title_row.addWidget(self.btn_reset_zoom, 0)
+
         self.btn_add_graph = QPushButton("+ Graph")
         self.btn_add_graph.setEnabled(False)
-        self.btn_add_graph.setToolTip("그래프를 하나 더 추가")
+        self.btn_add_graph.setToolTip("Add one more graph")
         self.btn_add_graph.clicked.connect(self.add_graph)
         title_row.addWidget(self.btn_add_graph, 0)
 
@@ -912,7 +914,7 @@ class CsvPlotPanel(QWidget):
 
         # X range
         range_row = QHBoxLayout()
-        range_row.addWidget(QLabel("X 범위:"), 0)
+        range_row.addWidget(QLabel("X range:"), 0)
         self.range_stack = QStackedWidget()
 
         self.dt_widget = QWidget()
@@ -1032,6 +1034,25 @@ class CsvPlotPanel(QWidget):
         self.status.setStyleSheet("color: gray;")
         root.addWidget(self.status)
 
+    def reset_zoom(self):
+        """✅ X축을 전체 범위로 초기화"""
+        if self.df is None or "_x" not in self.df.columns:
+            return
+
+        if self.x_is_datetime:
+            if self._full_x_min_dt is None or self._full_x_max_dt is None:
+                return
+            self.dt_start.setDateTime(self._full_x_min_dt)
+            self.dt_end.setDateTime(self._full_x_max_dt)
+        else:
+            if self._full_x_min_num is None or self._full_x_max_num is None:
+                return
+            self.num_start.setValue(float(self._full_x_min_num))
+            self.num_end.setValue(float(self._full_x_max_num))
+
+        self.status.setText("Zoom reset completed (full scale)")
+        self.plot()
+
     def _desired_cols(self) -> int:
         n = len(self._areas)
         if n <= 1:
@@ -1092,7 +1113,7 @@ class CsvPlotPanel(QWidget):
         if area not in self._areas:
             return
         if len(self._areas) <= 1:
-            QMessageBox.information(self, "삭제 불가", "최소 1개 그래프는 유지됩니다.")
+            QMessageBox.information(self, "Delete aborted", "At least one graph must remain.")
             return
         try:
             area.clear()
@@ -1167,13 +1188,13 @@ class CsvPlotPanel(QWidget):
     def clear_left(self):
         for cb in self.y_combos:
             cb.setCurrentText(NONE_ITEM)
-        self.status.setText("Left(Y) 선택 해제")
+        self.status.setText("Left(Y) deselect")
         self.plot()
 
     def clear_right(self):
         for cb in self.y2_combos:
             cb.setCurrentText(NONE_ITEM)
-        self.status.setText("Right(Y2) 선택 해제")
+        self.status.setText("Right(Y2) deselect")
         self.plot()
 
     def _detect_step_columns(self):
@@ -1265,14 +1286,14 @@ class CsvPlotPanel(QWidget):
     def load_csv(self, path: str | Path):
         path = Path(path)
         self.csv_path = path
-        self.title.setText(f"선택된 CSV: {path}")
+        self.title.setText(f"Selected CSV: {path}")
 
         try:
             df = pd.read_csv(path)
             if df.empty:
-                raise ValueError("CSV가 비어 있습니다.")
+                raise ValueError("CSV file is empty")
         except Exception as e:
-            QMessageBox.critical(self, "CSV 로드 실패", f"{e}")
+            QMessageBox.critical(self, "CSV file load aborted", f"{e}")
             return
 
         df = self._normalize_columns(df)
@@ -1284,9 +1305,27 @@ class CsvPlotPanel(QWidget):
         x_dt = pd.to_datetime(x_series, errors="coerce")
         valid_dt = int(x_dt.notna().sum())
 
+        # ✅ full range 초기화 값들
+        self._full_x_min_dt = None
+        self._full_x_max_dt = None
+        self._full_x_min_num = None
+        self._full_x_max_num = None
+
         if valid_dt > 0 and valid_dt >= int(len(x_series) * 0.8):
             self.x_is_datetime = True
             df["_x"] = x_dt
+
+            # ✅ 최소 줌 범위: 2초(2000ms)
+            self._min_zoom_span = 2000.0
+
+            # ✅ full range 저장
+            x_valid = df["_x"].dropna()
+            if not x_valid.empty:
+                xmin = pd.Timestamp(x_valid.min())
+                xmax = pd.Timestamp(x_valid.max())
+                self._full_x_min_dt = QDateTime.fromString(xmin.strftime("%Y-%m-%d %H:%M:%S"), "yyyy-MM-dd HH:mm:ss")
+                self._full_x_max_dt = QDateTime.fromString(xmax.strftime("%Y-%m-%d %H:%M:%S"), "yyyy-MM-dd HH:mm:ss")
+
             self._setup_x_range_datetime(df["_x"])
             self.range_stack.setCurrentWidget(self.dt_widget)
         else:
@@ -1295,10 +1334,25 @@ class CsvPlotPanel(QWidget):
             if x_num.notna().sum() == 0:
                 df["_x"] = range(len(df))
                 self.x_col = "(index)"
-                self._setup_x_range_numeric(df["_x"])
             else:
                 df["_x"] = x_num
-                self._setup_x_range_numeric(df["_x"])
+
+            # ✅ numeric이면 step(중앙값) 추정 → 최소 줌 = 2*step (fallback=0)
+            xv = pd.to_numeric(df["_x"], errors="coerce").dropna().sort_values()
+            step = 0.0
+            if len(xv) >= 3:
+                diffs = xv.diff().dropna()
+                diffs = diffs[diffs > 0]
+                if not diffs.empty:
+                    step = float(diffs.median())
+            self._min_zoom_span = float(step * 2.0) if step > 0 else 0.0
+
+            # ✅ full range 저장
+            if not xv.empty:
+                self._full_x_min_num = float(xv.min())
+                self._full_x_max_num = float(xv.max())
+
+            self._setup_x_range_numeric(df["_x"])
             self.range_stack.setCurrentWidget(self.num_widget)
 
         y_candidates: list[str] = []
@@ -1328,13 +1382,14 @@ class CsvPlotPanel(QWidget):
         self.btn_reset_left_scale.setEnabled(enabled)
         self.btn_reset_right_scale.setEnabled(enabled)
         self.btn_add_graph.setEnabled(enabled)
+        self.btn_reset_zoom.setEnabled(enabled)
 
         self.left_scale_mode.setCurrentText("Auto")
         self.right_scale_mode.setCurrentText("Auto")
         self._update_scale_enable_state()
 
         if not enabled:
-            self.status.setText("그래프로 그릴 수 있는 숫자형 컬럼이 없습니다.")
+            self.status.setText("No numeric columns found")
             self._clear_plot_all()
             return
 
@@ -1521,12 +1576,24 @@ class CsvPlotPanel(QWidget):
             return
 
         v0, v1 = dlg.values()
+
+        # ✅ 다이얼로그로 범위 지정 시에도 최소 줌 범위 제한
         if self.x_is_datetime:
+            ms0 = float(v0.toMSecsSinceEpoch())
+            ms1 = float(v1.toMSecsSinceEpoch())
+            if abs(ms1 - ms0) < max(2000.0, self._min_zoom_span):
+                self.status.setText("X Axis minimum span is too small(>2000ms)")
+                return
             self.dt_start.setDateTime(v0)
             self.dt_end.setDateTime(v1)
         else:
-            self.num_start.setValue(float(v0))
-            self.num_end.setValue(float(v1))
+            x0 = float(v0)
+            x1 = float(v1)
+            if self._min_zoom_span > 0 and abs(x1 - x0) < self._min_zoom_span:
+                self.status.setText("Can't zoom in too much(>2000ms)")
+                return
+            self.num_start.setValue(x0)
+            self.num_end.setValue(x1)
 
         self.plot()
 
@@ -1581,14 +1648,24 @@ class CsvPlotPanel(QWidget):
     def _apply_zoom_from_chart(self, area: PlotArea, xmin: float, xmax: float):
         if xmin > xmax:
             xmin, xmax = xmax, xmin
+
+        # ✅ 최소 줌 범위 제한 (datetime: 2초=2000ms, numeric: 2*step)
         if self.x_is_datetime:
+            min_span = max(2000.0, self._min_zoom_span)
+            if (xmax - xmin) < min_span:
+                self.status.setText("Can't Zoom in more than minimum range (X Axis)")
+                return
             q0 = QDateTime.fromMSecsSinceEpoch(int(xmin))
             q1 = QDateTime.fromMSecsSinceEpoch(int(xmax))
             self.dt_start.setDateTime(q0)
             self.dt_end.setDateTime(q1)
         else:
+            if self._min_zoom_span > 0 and (xmax - xmin) < self._min_zoom_span:
+                self.status.setText("Can't Zoom in more than minimum range (X Axis)")
+                return
             self.num_start.setValue(float(xmin))
             self.num_end.setValue(float(xmax))
+
         self.plot()
 
     @staticmethod
@@ -1606,7 +1683,7 @@ class CsvPlotPanel(QWidget):
             return
         df0 = self.df
         if "_x" not in df0.columns:
-            self.status.setText("내부 x축 컬럼(_x)이 없습니다. CSV를 다시 로드해주세요.")
+            self.status.setText("No internal X Axis columns, please load CSV file again")
             return
 
         df = df0.copy()
@@ -1622,7 +1699,7 @@ class CsvPlotPanel(QWidget):
             df = df[df["_x"].between(start, end, inclusive="both")]
 
         if df.empty:
-            self.status.setText("선택한 X 범위에 데이터가 없습니다.")
+            self.status.setText("No data in selected range (X Axis)")
             self._clear_plot_all()
             return
 
@@ -1644,7 +1721,7 @@ class CsvPlotPanel(QWidget):
             df[c] = pd.to_numeric(df[c], errors="coerce")
         df = df.dropna(subset=["_x"], how="any")
         if df.empty:
-            self.status.setText("유효한 데이터가 없습니다 (NaN 제거 후)")
+            self.status.setText("No sufficient data to plot (NaN deleted)")
             self._clear_plot_all()
             return
 
@@ -1844,7 +1921,7 @@ class CsvPlotPanel(QWidget):
             area.view._layout_bands()
 
         self.status.setText(
-            f"표시 중: {len(df)} rows | Graphs={len(self._areas)} | (Title/L·R 버튼=요소, X click=range, X drag=zoom, Y band=scale)"
+            f"표시 중: {len(df)} rows | Graphs={len(self._areas)} | (ResetZoom=전체복귀 · X click=range · X drag=zoom(>=2s) · Y band=scale)"
         )
 
 
@@ -1856,7 +1933,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.root_dir = Path(root_dir).resolve()
         self.alarm_dir = Path(alarm_dir).resolve()
-        self.setWindowTitle("병곤이가만듦")
+        self.setWindowTitle("Log Plotter")
 
         screen = QApplication.primaryScreen()
         geo = screen.availableGeometry()
