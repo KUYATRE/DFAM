@@ -632,7 +632,7 @@ class PlotArea:
         topbar.setSpacing(6)
 
         self.btn_delete = QPushButton("✕")
-        self.btn_delete.setToolTip("이 그래프 삭제")
+        self.btn_delete.setToolTip("Delete this graph")
         self.btn_delete.setFixedSize(26, 22)
         self.btn_delete.setStyleSheet(
             "QPushButton{border:1px solid rgba(0,0,0,0.2); border-radius:6px; background:rgba(255,255,255,0.85);}"
@@ -666,7 +666,7 @@ class PlotArea:
         # alarm
         self._alarm_hovering: bool = False
         self.alarm_series: QScatterSeries | None = None
-        self._alarm_map: dict[int, tuple[str, str, str, str]] = {}  # ms -> (timeStr, text, stepNo, stepName)
+        self._alarm_map: dict[int, list[tuple[str, str, str, str]]] = {}  # ms -> (timeStr, text, stepNo, stepName)
 
     def _find_nearest_y(self, series: QLineSeries, x: float) -> float | None:
         try:
@@ -777,10 +777,15 @@ class PlotArea:
         self.titlebar.setText("—")
 
     def _alarm_text_from_key(self, key_ms: int) -> str:
-        info = self._alarm_map.get(key_ms)
-        if not info:
+        infos = self._alarm_map.get(key_ms)
+        if not infos:
             return ""
-        time_str, txt, step_no, step_name = info
+
+        # 같은 ms에 여러 알람이 있으면 전부 출력
+        time_str = infos[0][0]  # 동일 시간대라고 가정(키가 ms라서)
+        step_no = infos[0][2] or ""
+        step_name = infos[0][3] or ""
+
         lines = [time_str]
         if step_no or step_name:
             if step_no and step_name:
@@ -789,8 +794,17 @@ class PlotArea:
                 lines.append(f"Step: {step_no}")
             else:
                 lines.append(f"Step: {step_name}")
-        if txt:
-            lines.append(txt)
+
+        # 알람 목록
+        if len(infos) > 1:
+            lines.append(f"Alarms: {len(infos)}")
+        for i, (_, txt, _, _) in enumerate(infos, start=1):
+            t = (txt or "").strip()
+            if not t:
+                continue
+            prefix = f"{i}. " if len(infos) > 1 else ""
+            lines.append(prefix + t)
+
         return "\n".join(lines).strip()
 
     def on_alarm_hovered(self, point: QPointF, state: bool):
@@ -1289,7 +1303,7 @@ class CsvPlotPanel(QWidget):
         self.title.setText(f"Selected CSV: {path}")
 
         try:
-            df = pd.read_csv(path)
+            df = pd.read_csv(path, low_memory=False)
             if df.empty:
                 raise ValueError("CSV file is empty")
         except Exception as e:
@@ -1902,19 +1916,43 @@ class CsvPlotPanel(QWidget):
                 area.alarm_series = alarm
                 area._alarm_map.clear()
 
+                # ✅ ms 기준으로 그룹화 (ms -> {"ts": Timestamp, "time_str": str, "texts": [..]})
+                grouped: dict[int, dict[str, object]] = {}
+
                 for t, txt in zip(events["_t"].tolist(), events["Text"].tolist()):
                     ts = pd.Timestamp(t)
+
+                    # ✅ 라인과 동일 방식으로 ms 계산(점 위치 유지)
                     ms = int(ts.to_pydatetime().timestamp() * 1000)
+
+                    if ms not in grouped:
+                        grouped[ms] = {
+                            "ts": ts,  # ✅ 원본 Timestamp 보관 (step 매칭용)
+                            "time_str": ts.strftime("%Y-%m-%d %H:%M:%S"),
+                            "texts": []
+                        }
+                    grouped[ms]["texts"].append("" if txt is None else str(txt))
+
+                for ms in sorted(grouped.keys()):
                     alarm.append(ms, y_marker)
 
-                    sn, sname = self._step_info_at(ts)
-                    time_str = ts.strftime("%Y-%m-%d %H:%M:%S")
-                    area._alarm_map[int(ms)] = (
-                        time_str,
-                        str(txt) if txt else "",
-                        "" if sn is None else str(sn),
-                        "" if sname is None else str(sname),
-                    )
+                    # ✅ 여기서 epoch->Timestamp 재생성 금지!
+                    ts_for_step = grouped[ms]["ts"]  # ✅ 원본 알람 시간 사용
+                    sn, sname = self._step_info_at(ts_for_step)
+
+                    time_str = str(grouped[ms]["time_str"])
+                    texts = grouped[ms]["texts"]
+
+                    area._alarm_map[ms] = []
+                    for txt2 in texts:
+                        area._alarm_map[ms].append(
+                            (
+                                time_str,
+                                str(txt2).strip(),
+                                "" if sn is None else str(sn),
+                                "" if sname is None else str(sname),
+                            )
+                        )
 
                 alarm.hovered.connect(area.on_alarm_hovered)
 
@@ -1993,10 +2031,10 @@ def main():
     logger.info("[APP] starting")
     app = QApplication(sys.argv)
 
-    # root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
-    root_dir = r"C:\hmi\System\RecipeProcLog"
-    # alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
-    alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
+    root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
+    # root_dir = r"C:\hmi\System\RecipeProcLog"
+    alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
+    # alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
 
     logger.info(f"[APP] paths root_dir={root_dir}, alarm_dir={alarm_dir}")
 
