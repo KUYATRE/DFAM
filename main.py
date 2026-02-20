@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QDateTimeEdit, QDoubleSpinBox, QMessageBox, QCheckBox,
     QDialog, QDialogButtonBox, QFormLayout, QListWidget, QListWidgetItem,
     QAbstractItemView, QGridLayout, QRubberBand,
-    QSizePolicy
+    QSizePolicy, QLineEdit,
 )
 
 from PySide6.QtCharts import (
@@ -274,21 +274,15 @@ class XRangeDialog(QDialog):
 
 
 class YColumnsDialog(QDialog):
-    """Y 축에 그릴 컬럼을 최대 3개까지 선택."""
+    """Y 축에 그릴 컬럼을 최대 3개까지 선택 (검색 지원)."""
     def __init__(self, title: str, items: list[str], selected: list[str], parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
 
-        self.listw = QListWidget()
-        self.listw.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.fl = FilterableList(items, placeholder="Search Y columns...", parent=self)
+        self.fl.set_selected(selected)
 
-        sel_set = set(selected)
-        for it in items:
-            item = QListWidgetItem(it)
-            item.setSelected(it in sel_set)
-            self.listw.addItem(item)
-
-        hint = QLabel("You can choose columns you want to plot on the Y axis.")
+        hint = QLabel("Type to search. You can choose columns you want to plot on the Y axis.")
         hint.setStyleSheet("color: gray;")
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -296,12 +290,12 @@ class YColumnsDialog(QDialog):
         btns.rejected.connect(self.reject)
 
         root = QVBoxLayout(self)
-        root.addWidget(self.listw, 1)
+        root.addWidget(self.fl, 1)
         root.addWidget(hint)
         root.addWidget(btns)
 
     def selected_items(self) -> list[str]:
-        return [i.text() for i in self.listw.selectedItems()]
+        return self.fl.selected_texts()
 
 
 # =========================================================
@@ -699,6 +693,16 @@ class PlotArea:
         if self.parent_panel.x_is_datetime:
             qdt = QDateTime.fromMSecsSinceEpoch(int(x))
             lines.append(qdt.toString("yyyy-MM-dd HH:mm:ss"))
+
+            # ✅ Step No / Step Name 추가
+            sn, sname = self.parent_panel._step_info_at_x_value(x)
+            if sn or sname:
+                if sn and sname:
+                    lines.append(f"Step: {sn} | {sname}")
+                elif sn:
+                    lines.append(f"Step: {sn}")
+                else:
+                    lines.append(f"Step: {sname}")
         else:
             lines.append(f"X = {x:.6g}")
 
@@ -836,6 +840,51 @@ class PlotArea:
             self.view.tip_alarm.set_target_hovering(False)
 
 
+class CompareDialog(QDialog):
+    def __init__(self, common_cols: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Compare Settings")
+
+        self.x_mode = QComboBox()
+        self.x_mode.addItems(["Elapsed seconds (Δt)", "Index"])
+
+        self.step_no_edit = QLineEdit()
+        self.step_no_edit.setPlaceholderText("e.g. 12 (blank = all steps)")
+
+        # ✅ 검색 가능한 Y 선택 리스트로 교체
+        self.y_pick = FilterableList(common_cols, placeholder="Search compare Y columns...", parent=self)
+
+        hint = QLabel("Select up to 3 Y columns to compare.")
+        hint.setStyleSheet("color: gray;")
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self.reject)
+
+        lay = QVBoxLayout(self)
+        form = QFormLayout()
+        form.addRow("X axis", self.x_mode)
+        form.addRow("Step No", self.step_no_edit)
+        lay.addLayout(form)
+
+        lay.addWidget(self.y_pick, 1)
+        lay.addWidget(hint)
+        lay.addWidget(btns)
+
+    def _on_accept(self):
+        if not self.y_pick.selected_texts():
+            QMessageBox.information(self, "Compare", "비교할 Y 컬럼을 최소 1개 선택해줘.")
+            return
+        self.accept()
+
+    def values(self):
+        cols = self.y_pick.selected_texts()
+        cols = cols[:3]
+
+        step_txt = (self.step_no_edit.text() or "").strip()
+        return (self.x_mode.currentText(), cols, step_txt)
+
+
 # =========================================================
 # Main Panel
 # =========================================================
@@ -865,6 +914,13 @@ class CsvPlotPanel(QWidget):
         self._full_x_min_num: float | None = None
         self._full_x_max_num: float | None = None
 
+        self._mode: str = "single"
+
+        # ✅ Compare mode zoom 상태
+        self._compare_active: bool = False
+        self._compare_full_xmin: float | None = None
+        self._compare_full_xmax: float | None = None
+
         self._build_ui()
 
     def _build_ui(self):
@@ -874,6 +930,11 @@ class CsvPlotPanel(QWidget):
         self.title = QLabel("Choose CSV File to Plot")
         self.title.setStyleSheet("font-weight: 700;")
         title_row.addWidget(self.title, 1)
+
+        self.btn_compare = QPushButton("Compare various logs")
+        self.btn_compare.setEnabled(True)
+        # self.btn_compare.clicked.connect(self.compare_selected_files)
+        title_row.addWidget(self.btn_compare, 0)
 
         # ✅ Reset Zoom 버튼 추가
         self.btn_reset_zoom = QPushButton("Reset Zoom")
@@ -1048,8 +1109,341 @@ class CsvPlotPanel(QWidget):
         self.status.setStyleSheet("color: gray;")
         root.addWidget(self.status)
 
+    @staticmethod
+    def _short_compare_label_from_filename(filename: str) -> str:
+        """
+        (튜브)_(레시피)_(JOB)_(날짜)_(시간).csv  ->  (튜브)_(레시피)_(JOB)
+        날짜/시간 포맷이 달라도 '뒤에서 2개 토큰'을 제거하는 방식이라 유연함.
+        """
+        stem = Path(filename).stem  # 확장자 제거
+        parts = stem.split("_")
+        if len(parts) >= 5:
+            parts = parts[:-2]  # 뒤 2개(날짜, 시간) 제거
+        return "_".join(parts) if parts else stem
+
+    @staticmethod
+    def _detect_step_no_column_in_df(df: pd.DataFrame) -> str | None:
+        cols = list(df.columns)
+        lower_map = {c: str(c).strip().lower() for c in cols}
+
+        candidates = [
+            "step no", "stepno", "step number", "stepnumber",
+            "step_no", "step-no", "step",
+        ]
+
+        # 1) exact
+        for c in cols:
+            if lower_map[c] in candidates:
+                return c
+
+        # 2) normalized exact/contains
+        import re
+        norm_map = {c: re.sub(r"[^a-z0-9]", "", lower_map[c]) for c in cols}
+        cand_norm = [re.sub(r"[^a-z0-9]", "", s) for s in candidates]
+
+        for c in cols:
+            for cn in cand_norm:
+                if cn and cn == norm_map[c]:
+                    return c
+
+        for c in cols:
+            v = norm_map[c]
+            for cn in cand_norm:
+                if cn and cn in v:
+                    return c
+
+        return None
+
+    @staticmethod
+    def _detect_step_name_column_in_df(df: pd.DataFrame) -> str | None:
+        cols = list(df.columns)
+        lower_map = {c: str(c).strip().lower() for c in cols}
+
+        candidates = [
+            "step name", "stepname", "step desc", "stepdesc", "step description",
+            "recipe step name", "recipestepname",
+        ]
+
+        # 1) exact
+        for c in cols:
+            if lower_map[c] in candidates:
+                return c
+
+        # 2) normalized exact/contains
+        import re
+        norm_map = {c: re.sub(r"[^a-z0-9]", "", lower_map[c]) for c in cols}
+        cand_norm = [re.sub(r"[^a-z0-9]", "", s) for s in candidates]
+
+        for c in cols:
+            for cn in cand_norm:
+                if cn and cn == norm_map[c]:
+                    return c
+
+        for c in cols:
+            v = norm_map[c]
+            for cn in cand_norm:
+                if cn and cn in v:
+                    return c
+
+        return None
+
+    @staticmethod
+    def _filter_df_by_step_no(df: pd.DataFrame, step_col: str, step_txt: str) -> pd.DataFrame:
+        """
+        step_txt:
+          - ""  : 필터 없음
+          - "12": 숫자면 numeric 비교 우선
+          - 그 외: 문자열 비교
+        """
+        if not step_txt:
+            return df
+
+        s = df[step_col]
+
+        # 숫자 입력이면 numeric 비교 우선
+        try:
+            target = int(step_txt)
+            sn = pd.to_numeric(s, errors="coerce")
+            m = sn.notna() & (sn.astype("int64") == target)
+            return df.loc[m].copy()
+        except Exception:
+            # 문자열 비교 fallback
+            m = s.astype(str).str.strip() == step_txt
+            return df.loc[m].copy()
+
+    def _common_numeric_columns(self, paths: list[Path]) -> list[str]:
+        common: set[str] | None = None
+        for p in paths:
+            try:
+                df = pd.read_csv(p, low_memory=False, nrows=200)  # 헤더/샘플만
+                df = self._normalize_columns(df)
+            except Exception:
+                continue
+
+            # 첫 컬럼(X) 제외하고 numeric 가능한 컬럼만
+            cols = []
+            for c in df.columns[1:]:
+                s = pd.to_numeric(df[c], errors="coerce")
+                if s.notna().any():
+                    cols.append(c)
+
+            if common is None:
+                common = set(cols)
+            else:
+                common &= set(cols)
+
+        return sorted(common) if common else []
+
+    def compare_files(self, paths: list[Path]):
+        if not paths:
+            return
+
+        self._mode = "compare"  # ✅ Compare 모드
+
+        common_cols = self._common_numeric_columns(paths)
+        if not common_cols:
+            QMessageBox.information(self, "Compare", "Can't find common numeric columns.")
+            return
+
+        dlg = CompareDialog(common_cols, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        x_mode, y_cols, step_txt = dlg.values()
+        if not y_cols:
+            QMessageBox.information(self, "Compare", "Select Y columns to compare.")
+            return
+
+        # 그래프 1개로 비교
+        if not self._areas:
+            self._areas = [PlotArea(self)]
+            self._rebuild_plot_layout(force=True)
+
+        area = self._areas[0]
+        area.clear()
+
+        chart = area.chart
+        chart.legend().setVisible(True)
+
+        ax_x = QValueAxis()
+        ax_x.setTickCount(6)
+        ax_x.setTitleText("Elapsed (s)" if "Elapsed" in x_mode else "Index")
+        area.axis_x_num = ax_x
+        chart.addAxis(ax_x, Qt.AlignBottom)
+
+        ax_l = QValueAxis()
+        ax_l.setTickCount(6)
+        area.axis_y_left = ax_l
+        chart.addAxis(ax_l, Qt.AlignLeft)
+
+        used_colors = set()
+        color_gen = self._unique_color_generator()
+
+        def pick_color():
+            while True:
+                c = next(color_gen)
+                if c not in used_colors:
+                    used_colors.add(c)
+                    return QColor(c)
+
+        global_xmin, global_xmax = None, None
+        global_ymin, global_ymax = None, None
+
+        plotted_any = False
+        step_names: set[str] = set()
+
+        for p in paths:
+            try:
+                df = pd.read_csv(p, low_memory=False)
+                if df.empty:
+                    continue
+                df = self._normalize_columns(df)
+            except Exception:
+                continue
+
+            # ✅ Step No 필터
+            step_col = self._detect_step_no_column_in_df(df)
+            step_name_col = self._detect_step_name_column_in_df(df)  # ✅ 추가
+
+            if step_txt:
+                if not step_col or step_col not in df.columns:
+                    continue
+                df = self._filter_df_by_step_no(df, step_col, step_txt)
+                if df.empty:
+                    continue
+
+                # ✅ Step Name 수집 (가능하면)
+                if step_name_col and step_name_col in df.columns:
+                    sn_series = df[step_name_col].astype(str).str.strip()
+                    sn_series = sn_series[sn_series.notna() & (sn_series != "") & (sn_series.str.lower() != "nan")]
+                    if not sn_series.empty:
+                        step_names.add(sn_series.iloc[0])
+
+            # ✅ X 처리 + 정렬
+            x_raw = df[df.columns[0]]
+            x_dt = pd.to_datetime(x_raw, errors="coerce")
+            is_dt = x_dt.notna().sum() >= int(len(x_raw) * 0.8)
+
+            if "Elapsed" in x_mode:
+                if not is_dt:
+                    continue  # elapsed는 datetime 기반만
+                # 시간으로 정렬 후 elapsed 계산
+                tmp = df.copy()
+                tmp["_xdt"] = x_dt
+                tmp = tmp.dropna(subset=["_xdt"])
+                if tmp.empty:
+                    continue
+                tmp = tmp.sort_values("_xdt").reset_index(drop=True)
+
+                t0 = tmp["_xdt"].iloc[0]
+                x_vals = (tmp["_xdt"] - t0).dt.total_seconds().astype("float64")
+                df_use = tmp
+            else:
+                # Index 비교: (필터 후) 원본 순서 유지가 싫으면 아래처럼 X(시간) 있으면 정렬
+                df_use = df.copy()
+                if is_dt:
+                    df_use["_xdt"] = x_dt
+                    df_use = df_use.sort_values("_xdt").reset_index(drop=True)
+                else:
+                    df_use = df_use.reset_index(drop=True)
+
+                x_vals = pd.Series(range(len(df_use)), dtype="float64")
+
+            for yc in y_cols:
+                if yc not in df_use.columns:
+                    continue
+                y_vals = pd.to_numeric(df_use[yc], errors="coerce")
+
+                m = x_vals.notna() & y_vals.notna()
+                if m.sum() == 0:
+                    continue
+
+                xs = x_vals[m].astype("float64")
+                ys = y_vals[m].astype("float64")
+
+                xmin, xmax = float(xs.min()), float(xs.max())
+                ymin, ymax = float(ys.min()), float(ys.max())
+
+                global_xmin = xmin if global_xmin is None else min(global_xmin, xmin)
+                global_xmax = xmax if global_xmax is None else max(global_xmax, xmax)
+                global_ymin = ymin if global_ymin is None else min(global_ymin, ymin)
+                global_ymax = ymax if global_ymax is None else max(global_ymax, ymax)
+
+                s = QLineSeries()
+                step_tag = f" | Step={step_txt}" if step_txt else ""
+                short_name = self._short_compare_label_from_filename(p.name)
+                s.setName(f"{short_name}{step_tag} | {yc}")
+
+                pen = s.pen()
+                pen.setWidthF(1.6)
+                pen.setColor(pick_color())
+                s.setPen(pen)
+
+                for x, y in zip(xs.tolist(), ys.tolist()):
+                    s.append(float(x), float(y))
+
+                chart.addSeries(s)
+                s.attachAxis(ax_x)
+                s.attachAxis(ax_l)
+                area.left_series.append(s)
+
+                plotted_any = True
+
+        if not plotted_any or global_xmin is None:
+            QMessageBox.information(self, "Compare", "No data to compare")
+            return
+
+        ax_x.setRange(global_xmin, global_xmax)
+        if global_ymin is None or global_ymax is None:
+            global_ymin, global_ymax = 0.0, 1.0
+        if global_ymin == global_ymax:
+            global_ymax = global_ymin + 1.0
+        ax_l.setRange(global_ymin, global_ymax)
+        ax_l.applyNiceNumbers()
+
+        step_name_tag = ""
+        if step_txt and step_names:
+            if len(step_names) == 1:
+                step_name_tag = f" | {next(iter(step_names))}"
+            else:
+                step_name_tag = " | (multiple step names)"
+
+        area.titlebar.setText(
+            f"COMPARE ({'Δt' if 'Elapsed' in x_mode else 'Index'})"
+            + (f" | Step={step_txt}" if step_txt else "")
+            + step_name_tag
+        )
+        self.status.setText(
+            f"Compare: files={len(paths)} | Step={step_txt or 'ALL'} | Y={', '.join(y_cols)}"
+        )
+        area.view._layout_bands()
+
+        # ✅ Compare mode 줌 리셋을 위해 전체 범위 저장
+        self._compare_active = True
+        self._compare_full_xmin = float(global_xmin)
+        self._compare_full_xmax = float(global_xmax)
+
+        # Compare 모드에서도 Reset Zoom 활성
+        self.btn_reset_zoom.setEnabled(True)
+
     def reset_zoom(self):
-        """✅ X축을 전체 범위로 초기화"""
+        """✅ X축을 전체 범위로 초기화 (Normal/Compare 모두 지원)"""
+
+        # ✅ Compare mode면: 축 range만 원복
+        if self._compare_active:
+            if not self._areas:
+                return
+            area = self._areas[0]
+            if area.axis_x_num is None:
+                return
+            if self._compare_full_xmin is None or self._compare_full_xmax is None:
+                return
+
+            area.axis_x_num.setRange(self._compare_full_xmin, self._compare_full_xmax)
+            self.status.setText("Compare zoom reset completed (full scale)")
+            return
+
+        # ----- 이하 기존 normal mode 로직 그대로 -----
         if self.df is None or "_x" not in self.df.columns:
             return
 
@@ -1294,12 +1688,32 @@ class CsvPlotPanel(QWidget):
 
         return step_no, step_name
 
+    def _step_info_at_x_value(self, x_value: float) -> tuple[str | None, str | None]:
+        """
+        crosshair에서 얻은 x_value(ms epoch)로 Step No/Name을 찾는다.
+        plot에서 ms 계산에 사용한 방식(timestamp())과 동일하게 맞추기 위해
+        fromtimestamp()를 사용한다. (timezone mismatch 최소화)
+        """
+        if not self.x_is_datetime:
+            return None, None
+        try:
+            # x_value는 ms
+            t = pd.Timestamp.fromtimestamp(float(x_value) / 1000.0)
+        except Exception:
+            return None, None
+        return self._step_info_at(t)
+
     # -----------------------------
     # CSV load
     # -----------------------------
     def load_csv(self, path: str | Path):
         path = Path(path)
         self.csv_path = path
+        self._mode = "single"  # ✅ CSV 로드 시 일반 모드
+        # ✅ 일반 모드 진입 시 compare 해제
+        self._compare_active = False
+        self._compare_full_xmin = None
+        self._compare_full_xmax = None
         self.title.setText(f"Selected CSV: {path}")
 
         try:
@@ -1663,7 +2077,22 @@ class CsvPlotPanel(QWidget):
         if xmin > xmax:
             xmin, xmax = xmax, xmin
 
-        # ✅ 최소 줌 범위 제한 (datetime: 2초=2000ms, numeric: 2*step)
+        # ✅ Compare mode: axis range만 변경하고 plot() 절대 호출하지 않음
+        if self._compare_active:
+            if area.axis_x_num is None:
+                return
+
+            # 최소 줌 제한(원하는 값으로 조절 가능)
+            min_span = 2.0  # elapsed(s)나 index 기준 최소 폭
+            if (xmax - xmin) < min_span:
+                self.status.setText("Can't Zoom in more than minimum range (Compare X Axis)")
+                return
+
+            area.axis_x_num.setRange(float(xmin), float(xmax))
+            self.status.setText("Compare zoom applied")
+            return
+
+        # ----- 이하 기존 normal mode 로직 그대로 -----
         if self.x_is_datetime:
             min_span = max(2000.0, self._min_zoom_span)
             if (xmax - xmin) < min_span:
@@ -1963,6 +2392,50 @@ class CsvPlotPanel(QWidget):
         )
 
 
+class FilterableList(QWidget):
+    """
+    QListWidget + 검색창(QLineEdit)
+    - 타이핑 시 매칭 안되는 항목 숨김
+    - 선택 상태는 유지됨(숨겨져도 선택은 유지될 수 있음)
+    """
+    def __init__(self, items: list[str], *, placeholder: str = "Search...", parent=None):
+        super().__init__(parent)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(placeholder)
+
+        self.listw = QListWidget()
+        self.listw.setSelectionMode(QAbstractItemView.MultiSelection)
+
+        for t in items:
+            self.listw.addItem(QListWidgetItem(t))
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        lay.addWidget(self.search, 0)
+        lay.addWidget(self.listw, 1)
+
+        self.search.textChanged.connect(self._apply_filter)
+
+    def _apply_filter(self, text: str):
+        q = (text or "").strip().lower()
+        for i in range(self.listw.count()):
+            it = self.listw.item(i)
+            if not q:
+                it.setHidden(False)
+            else:
+                it.setHidden(q not in it.text().lower())
+
+    def set_selected(self, selected: list[str]):
+        sel = set(selected)
+        for i in range(self.listw.count()):
+            it = self.listw.item(i)
+            it.setSelected(it.text() in sel)
+
+    def selected_texts(self) -> list[str]:
+        return [i.text() for i in self.listw.selectedItems()]
+
 # =========================================================
 # MainWindow
 # =========================================================
@@ -1994,6 +2467,7 @@ class MainWindow(QMainWindow):
         self.tree = QTreeView()
         self.tree.setModel(self.model)
         self.tree.setRootIndex(self.model.index(str(self.root_dir)))
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
 
         for col in range(self.model.columnCount()):
             if col not in (0, 3):  # 0: Name, 3: Date Modified
@@ -2010,11 +2484,22 @@ class MainWindow(QMainWindow):
         self.plot_panel = CsvPlotPanel(alarm_dir=self.alarm_dir)
         self.plot_panel.setMinimumWidth(0)
         self.plot_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.plot_panel.btn_compare.clicked.connect(self.on_compare_selected)
         splitter.addWidget(self.plot_panel)
 
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 6)
         self.setCentralWidget(splitter)
+
+    def on_compare_selected(self):
+        idxs = self.tree.selectionModel().selectedRows()
+        paths = []
+        for idx in idxs:
+            p = Path(self.model.filePath(idx))
+            if p.is_file() and p.suffix.lower() == ".csv":
+                paths.append(p)
+        if paths:
+            self.plot_panel.compare_files(paths)
 
     def on_tree_double_clicked(self, index):
         path = Path(self.model.filePath(index))
@@ -2031,10 +2516,10 @@ def main():
     logger.info("[APP] starting")
     app = QApplication(sys.argv)
 
-    root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
-    # root_dir = r"C:\hmi\System\RecipeProcLog"
-    alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
-    # alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
+    # root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
+    root_dir = r"C:\hmi\System\RecipeProcLog"
+    # alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
+    alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
 
     logger.info(f"[APP] paths root_dir={root_dir}, alarm_dir={alarm_dir}")
 
