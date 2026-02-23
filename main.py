@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from PySide6.QtCore import Qt, QDir, QDateTime, QPoint, QPointF, QRect, QRectF, QMargins, QTimer, Signal
+from PySide6.QtCore import Qt, QDir, QDateTime, QPoint, QPointF, QRect, QRectF, QMargins, QTimer, Signal, QSize
 from PySide6.QtGui import QPainter, QColor, QPen, QCursor, QBrush
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
@@ -378,8 +378,8 @@ class PowerChartView(QChartView):
         self.setMouseTracking(True)
         self.setRubberBand(QChartView.NoRubberBand)
 
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.setMinimumSize(0, 0)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         logger.debug("[UI][PowerChartView] init")
 
@@ -417,6 +417,13 @@ class PowerChartView(QChartView):
         # ✅ custom tips
         self.tip_cross = StickyTip(self, kind="cross")
         self.tip_alarm = StickyTip(self, kind="alarm")
+
+    def minimumSizeHint(self) -> QSize:
+        # ✅ 핵심: QChartView 기본값(큰 값)을 무시
+        return QSize(0, 0)
+
+    def sizeHint(self) -> QSize:
+        return QSize(200, 120)  # 너무 0이면 UX가 이상할 수 있어 적당히
 
     def _ensure_scene_items(self):
         sc = self.chart().scene()
@@ -554,10 +561,12 @@ class PowerChartView(QChartView):
             self.area.parent_panel._open_x_range_dialog()
             return
         if kind == "y_left":
-            self.area.parent_panel._open_y_scale_dialog(side="left")
+            # self.area.parent_panel._open_y_scale_dialog(side="left")
+            self.area.parent_panel._open_y_scale_dialog(side="left", area=self.area)
             return
         if kind == "y_right":
-            self.area.parent_panel._open_y_scale_dialog(side="right")
+            # self.area.parent_panel._open_y_scale_dialog(side="right")
+            self.area.parent_panel._open_y_scale_dialog(side="right", area=self.area)
             return
 
         if self._plot_contains(e.position().toPoint()):
@@ -624,8 +633,8 @@ class PlotArea:
 
         # container
         self.widget = QWidget()
+        self.widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.widget.setMinimumSize(0, 0)
-        self.widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         wlay = QVBoxLayout(self.widget)
         wlay.setContentsMargins(0, 0, 0, 0)
@@ -1463,6 +1472,9 @@ class CsvPlotPanel(QWidget):
         # Reset Zoom은 그래프들 중 하나라도 compare면 활성화
         self.btn_reset_zoom.setEnabled(True)
 
+        # ✅ [FIX] Compare로 처음 열린 경우에도 그래프 추가 가능하도록
+        self.btn_add_graph.setEnabled(True)
+
     def reset_zoom(self):
         """✅ X축을 전체 범위로 초기화 (Normal/Compare 모두 지원)"""
 
@@ -1977,7 +1989,64 @@ class CsvPlotPanel(QWidget):
         return filtered
 
     # Dialog openers
-    def _open_y_scale_dialog(self, side: str):
+    def _open_y_scale_dialog(self, side: str, area: PlotArea | None = None):
+        # ✅ Compare 그래프라면: 현재 axis 값으로 다이얼로그를 띄우고, 적용도 axis에 직접
+        if area is not None and area.compare_active:
+            ax = area.axis_y_left if side == "left" else area.axis_y_right
+            if ax is None:
+                return
+
+            # 현재 축 상태를 dialog 초기값으로 사용
+            cur_mode = "Auto"
+            cur_ymin = float(ax.min())
+            cur_ymax = float(ax.max())
+            cur_is_log = False
+
+            dlg = YScaleDialog(
+                title=("Left Y Scale (Compare)" if side == "left" else "Right Y2 Scale (Compare)"),
+                mode=cur_mode,
+                ymin=cur_ymin,
+                ymax=cur_ymax,
+                is_log=cur_is_log,
+                parent=self,
+            )
+            if dlg.exec() != QDialog.Accepted:
+                return
+
+            mode, ymin, ymax, _is_log = dlg.values()
+
+            if mode == "Manual":
+                if ymin == ymax:
+                    return
+                if ymin > ymax:
+                    ymin, ymax = ymax, ymin
+                ax.setRange(float(ymin), float(ymax))
+            else:
+                # Auto: series 전체 min/max로 재설정
+                ymin2, ymax2 = None, None
+
+                series_list = area.left_series if side == "left" else area.right_series
+                for s in series_list:
+                    try:
+                        pts = s.points()
+                    except Exception:
+                        continue
+                    for p in pts:
+                        y = float(p.y())
+                        ymin2 = y if ymin2 is None else min(ymin2, y)
+                        ymax2 = y if ymax2 is None else max(ymax2, y)
+
+                if ymin2 is None or ymax2 is None:
+                    return
+                if ymin2 == ymax2:
+                    ymax2 = ymin2 + 1.0
+                ax.setRange(float(ymin2), float(ymax2))
+                ax.applyNiceNumbers()
+
+            # Compare는 plot()을 안 타니까 여기서 끝
+            return
+
+        # ----- 이하: 기존 Normal 모드 로직 그대로 -----
         if side == "left":
             dlg = YScaleDialog(
                 title="Left Y Scale",
