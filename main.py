@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from PySide6.QtCore import Qt, QDir, QDateTime, QPoint, QPointF, QRect, QRectF, QMargins, QTimer
+from PySide6.QtCore import Qt, QDir, QDateTime, QPoint, QPointF, QRect, QRectF, QMargins, QTimer, Signal
 from PySide6.QtGui import QPainter, QColor, QPen, QCursor, QBrush
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
@@ -645,12 +645,26 @@ class PlotArea:
         )
         self.btn_delete.clicked.connect(lambda: self.parent_panel.delete_graph(self))
 
+        self.btn_compare = QPushButton("Compare")
+        self.btn_compare.setToolTip("Compare selected logs on this graph")
+        self.btn_compare.setFixedHeight(22)
+        self.btn_compare.setStyleSheet(
+            "QPushButton{border:1px solid rgba(0,0,0,0.2); border-radius:6px; background:rgba(255,255,255,0.85); padding:0px 10px;}"
+            "QPushButton:hover{background:rgba(255,255,255,1.0);}"
+            "QPushButton:pressed{background:rgba(230,230,230,1.0);}"
+        )
+        self.btn_compare.setCursor(Qt.PointingHandCursor)
+
+        # ✅ 여기서 MainWindow가 선택 파일을 가져오도록 "요청"만 보냄
+        self.btn_compare.clicked.connect(lambda: self.parent_panel.request_compare_for_area(self))
+
         self.titlebar = TitleBar(
             on_pick_left=lambda: self.parent_panel._open_y_columns_dialog(side="left", area=self),
             on_pick_right=lambda: self.parent_panel._open_y_columns_dialog(side="right", area=self),
         )
 
         topbar.addWidget(self.titlebar, 1)
+        topbar.addWidget(self.btn_compare, 0, Qt.AlignRight)
         topbar.addWidget(self.btn_delete, 0, Qt.AlignRight)
 
         wlay.addLayout(topbar)
@@ -671,6 +685,10 @@ class PlotArea:
         self._alarm_hovering: bool = False
         self.alarm_series: QScatterSeries | None = None
         self._alarm_map: dict[int, list[tuple[str, str, str, str]]] = {}  # ms -> (timeStr, text, stepNo, stepName)
+
+        self.compare_active: bool = False
+        self.compare_full_xmin: float | None = None
+        self.compare_full_xmax: float | None = None
 
     def _find_nearest_y(self, series: QLineSeries, x: float) -> float | None:
         try:
@@ -899,6 +917,8 @@ class CompareDialog(QDialog):
 # Main Panel
 # =========================================================
 class CsvPlotPanel(QWidget):
+    compareRequested = Signal(object)  # object = PlotArea
+
     def __init__(self, alarm_dir: Path, parent=None):
         super().__init__(parent)
 
@@ -943,6 +963,7 @@ class CsvPlotPanel(QWidget):
 
         self.btn_compare = QPushButton("Compare various logs")
         self.btn_compare.setEnabled(True)
+        self.btn_compare.setVisible(False)  # ✅ 안 보이게
         # self.btn_compare.clicked.connect(self.compare_selected_files)
         title_row.addWidget(self.btn_compare, 0)
 
@@ -1119,6 +1140,10 @@ class CsvPlotPanel(QWidget):
         self.status.setStyleSheet("color: gray;")
         root.addWidget(self.status)
 
+    def request_compare_for_area(self, area: PlotArea):
+        """PlotArea의 Compare 버튼이 눌렸을 때 MainWindow로 요청을 전달."""
+        self.compareRequested.emit(area)
+
     @staticmethod
     def _short_compare_label_from_filename(filename: str) -> str:
         """
@@ -1244,7 +1269,7 @@ class CsvPlotPanel(QWidget):
 
         return sorted(common) if common else []
 
-    def compare_files(self, paths: list[Path]):
+    def compare_files(self, paths: list[Path], target_area: PlotArea | None = None):
         if not paths:
             return
 
@@ -1264,12 +1289,15 @@ class CsvPlotPanel(QWidget):
             QMessageBox.information(self, "Compare", "Select Y columns to compare.")
             return
 
-        # 그래프 1개로 비교
+        # ✅ target_area가 없으면 첫 그래프를 사용 (fallback)
         if not self._areas:
-            self._areas = [PlotArea(self)]
+            a0 = PlotArea(self)
+            self._areas.append(a0)
             self._rebuild_plot_layout(force=True)
 
-        area = self._areas[0]
+        area = target_area if target_area is not None else self._areas[0]
+        if area not in self._areas:
+            area = self._areas[0]
         area.clear()
 
         chart = area.chart
@@ -1428,29 +1456,31 @@ class CsvPlotPanel(QWidget):
         )
         area.view._layout_bands()
 
-        # ✅ Compare mode 줌 리셋을 위해 전체 범위 저장
-        self._compare_active = True
-        self._compare_full_xmin = float(global_xmin)
-        self._compare_full_xmax = float(global_xmax)
+        area.compare_active = True
+        area.compare_full_xmin = float(global_xmin)
+        area.compare_full_xmax = float(global_xmax)
 
-        # Compare 모드에서도 Reset Zoom 활성
+        # Reset Zoom은 그래프들 중 하나라도 compare면 활성화
         self.btn_reset_zoom.setEnabled(True)
 
     def reset_zoom(self):
         """✅ X축을 전체 범위로 초기화 (Normal/Compare 모두 지원)"""
 
-        # ✅ Compare mode면: 축 range만 원복
-        if self._compare_active:
-            if not self._areas:
-                return
-            area = self._areas[0]
-            if area.axis_x_num is None:
-                return
-            if self._compare_full_xmin is None or self._compare_full_xmax is None:
-                return
-
-            area.axis_x_num.setRange(self._compare_full_xmin, self._compare_full_xmax)
-            self.status.setText("Compare zoom reset completed (full scale)")
+        # ✅ compare 그래프가 하나라도 있으면: compare_active인 area들만 각자 원복
+        any_compare = any(a.compare_active for a in self._areas)
+        if any_compare:
+            did = False
+            for a in self._areas:
+                if not a.compare_active:
+                    continue
+                if a.axis_x_num is None:
+                    continue
+                if a.compare_full_xmin is None or a.compare_full_xmax is None:
+                    continue
+                a.axis_x_num.setRange(a.compare_full_xmin, a.compare_full_xmax)
+                did = True
+            if did:
+                self.status.setText("Compare zoom reset completed (full scale)")
             return
 
         # ----- 이하 기존 normal mode 로직 그대로 -----
@@ -1720,10 +1750,11 @@ class CsvPlotPanel(QWidget):
         path = Path(path)
         self.csv_path = path
         self._mode = "single"  # ✅ CSV 로드 시 일반 모드
-        # ✅ 일반 모드 진입 시 compare 해제
-        self._compare_active = False
-        self._compare_full_xmin = None
-        self._compare_full_xmax = None
+        # ✅ CSV 로드 시: 모든 area의 compare 상태 해제
+        for a in self._areas:
+            a.compare_active = False
+            a.compare_full_xmin = None
+            a.compare_full_xmax = None
         self.title.setText(f"Selected CSV: {path}")
 
         try:
@@ -2087,13 +2118,11 @@ class CsvPlotPanel(QWidget):
         if xmin > xmax:
             xmin, xmax = xmax, xmin
 
-        # ✅ Compare mode: axis range만 변경하고 plot() 절대 호출하지 않음
-        if self._compare_active:
+        if area.compare_active:
             if area.axis_x_num is None:
                 return
 
-            # 최소 줌 제한(원하는 값으로 조절 가능)
-            min_span = 2.0  # elapsed(s)나 index 기준 최소 폭
+            min_span = 2.0
             if (xmax - xmin) < min_span:
                 self.status.setText("Can't Zoom in more than minimum range (Compare X Axis)")
                 return
@@ -2187,6 +2216,16 @@ class CsvPlotPanel(QWidget):
             events = None
 
         for idx, area in enumerate(self._areas):
+
+            # ✅ Compare로 만들어진 그래프는 plot()에서 건드리지 않는다
+            # (add_graph / clear_left/right / reset zoom 등으로 plot()이 호출돼도 compare 유지)
+            if area.compare_active:
+                try:
+                    area.view._layout_bands()
+                except Exception:
+                    pass
+                continue
+
             area.clear()
 
             left_cols = [c for c in area.left_cols if c in df.columns]
@@ -2505,11 +2544,26 @@ class MainWindow(QMainWindow):
         self.plot_panel.setMinimumWidth(0)
         self.plot_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.plot_panel.btn_compare.clicked.connect(self.on_compare_selected)
+        self.plot_panel.compareRequested.connect(self.on_compare_requested)
         splitter.addWidget(self.plot_panel)
 
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 6)
         self.setCentralWidget(splitter)
+
+    def on_compare_requested(self, area):
+        # 트리에서 선택된 csv들 가져오기
+        idxs = self.tree.selectionModel().selectedRows()
+        paths = []
+        for idx in idxs:
+            p = Path(self.model.filePath(idx))
+            if p.is_file() and p.suffix.lower() == ".csv":
+                paths.append(p)
+
+        if paths:
+            self.plot_panel.compare_files(paths, target_area=area)
+        else:
+            QMessageBox.information(self, "Compare", "Please select CSV files from tree view.")
 
     def on_compare_selected(self):
         idxs = self.tree.selectionModel().selectedRows()
