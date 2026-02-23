@@ -285,6 +285,10 @@ class YColumnsDialog(QDialog):
         hint = QLabel("Type to search. You can choose columns you want to plot on the Y axis.")
         hint.setStyleSheet("color: gray;")
 
+        self.btn_clear = QPushButton("Clear selection")
+        self.btn_clear.setCursor(Qt.PointingHandCursor)
+        self.btn_clear.clicked.connect(self.fl.clear_selection)
+
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
@@ -293,6 +297,12 @@ class YColumnsDialog(QDialog):
         root.addWidget(self.fl, 1)
         root.addWidget(hint)
         root.addWidget(btns)
+
+        row = QHBoxLayout()
+        row.addWidget(self.btn_clear, 0)
+        row.addStretch(1)
+        row.addWidget(btns, 0)
+        root.addLayout(row)
 
     def selected_items(self) -> list[str]:
         return self.fl.selected_texts()
@@ -2436,6 +2446,16 @@ class FilterableList(QWidget):
     def selected_texts(self) -> list[str]:
         return [i.text() for i in self.listw.selectedItems()]
 
+    def clear_selection(self):
+        """전체 선택 해제(숨김 상태 포함 전부 해제)"""
+        self.listw.blockSignals(True)
+        try:
+            for i in range(self.listw.count()):
+                it = self.listw.item(i)
+                it.setSelected(False)
+        finally:
+            self.listw.blockSignals(False)
+
 # =========================================================
 # MainWindow
 # =========================================================
@@ -2516,10 +2536,10 @@ def main():
     logger.info("[APP] starting")
     app = QApplication(sys.argv)
 
-    # root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
-    root_dir = r"C:\hmi\System\RecipeProcLog"
-    # alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
-    alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
+    root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
+    # root_dir = r"C:\hmi\System\RecipeProcLog"
+    alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
+    # alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
 
     logger.info(f"[APP] paths root_dir={root_dir}, alarm_dir={alarm_dir}")
 

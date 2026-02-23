@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="225c8168-e893-4b53-808a-a9f4aedbaaf5" name="변경" comment="English patch,X-zoom bug fix &amp; exception processing">
+    <list default="true" id="225c8168-e893-4b53-808a-a9f4aedbaaf5" name="변경" comment="Y Component select/clear button added on dialog">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
@@ -109,7 +109,8 @@
       <workItem from="1771174517133" duration="1718000" />
       <workItem from="1771247277997" duration="12506000" />
       <workItem from="1771280245698" duration="2450000" />
-      <workItem from="1771601633820" duration="6528000" />
+      <workItem from="1771601633820" duration="10655000" />
+      <workItem from="1771853428266" duration="4580000" />
     </task>
     <task id="LOCAL-00001" summary="New Project">
       <option name="closed" value="true" />
@@ -223,7 +224,15 @@
       <option name="project" value="LOCAL" />
       <updated>1771601891094</updated>
     </task>
-    <option name="localTasksCounter" value="15" />
+    <task id="LOCAL-00015" summary="Various log comparison mode updated">
+      <option name="closed" value="true" />
+      <created>1771620133367</created>
+      <option name="number" value="00015" />
+      <option name="presentableId" value="LOCAL-00015" />
+      <option name="project" value="LOCAL" />
+      <updated>1771620133367</updated>
+    </task>
+    <option name="localTasksCounter" value="16" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -247,10 +256,12 @@
     <MESSAGE value="Replace matplotlib-based plotting with QtCharts for enhanced interactivity and simplified integration." />
     <MESSAGE value="Add extensive debug logging for UI interactions, plotting processes, and alarm data handling to improve traceability and issue diagnostics." />
     <MESSAGE value="English patch,X-zoom bug fix &amp; exception processing" />
-    <option name="LAST_COMMIT_MESSAGE" value="English patch,X-zoom bug fix &amp; exception processing" />
+    <MESSAGE value="Various log comparison mode updated" />
+    <MESSAGE value="Y Component select/clear button added on dialog" />
+    <option name="LAST_COMMIT_MESSAGE" value="Y Component select/clear button added on dialog" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/DFAM$logger.coverage" NAME="logger 커버리지 결과" MODIFIED="1766695351526" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/utils" />
-    <SUITE FILE_PATH="coverage/DFAM$main.coverage" NAME="main 커버리지 결과" MODIFIED="1771611636869" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/DFAM$main.coverage" NAME="main 커버리지 결과" MODIFIED="1771855595220" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
 </project>
