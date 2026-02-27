@@ -25,6 +25,9 @@ from PySide6.QtWidgets import QGraphicsLineItem, QGraphicsRectItem, QGraphicsEll
 import re
 from dataclasses import dataclass
 
+from PySide6.QtCore import QDate
+from PySide6.QtWidgets import QDateEdit
+
 
 # -----------------------------
 # logger fallback
@@ -1030,9 +1033,38 @@ class HistoryDialog(QDialog):
         self.btn_export = QPushButton("Export raw data (Excel)")
         self.btn_export.setCursor(Qt.PointingHandCursor)
 
+        # ✅ 기간 선택 (날짜 단위)
+        self.date_from = QDateEdit()
+        self.date_from.setCalendarPopup(True)
+        self.date_from.setDisplayFormat("yyyy-MM-dd")
+
+        self.date_to = QDateEdit()
+        self.date_to.setCalendarPopup(True)
+        self.date_to.setDisplayFormat("yyyy-MM-dd")
+
+        # df_logs 기반으로 기본값 세팅
+        if not self.df_logs.empty and "date_dt" in self.df_logs.columns:
+            dmin = pd.to_datetime(self.df_logs["date_dt"].min()).date()
+            dmax = pd.to_datetime(self.df_logs["date_dt"].max()).date()
+            self.date_from.setDate(QDate(dmin.year, dmin.month, dmin.day))
+            self.date_to.setDate(QDate(dmax.year, dmax.month, dmax.day))
+        else:
+            today = QDate.currentDate()
+            self.date_from.setDate(today.addMonths(-1))
+            self.date_to.setDate(today)
+
+        # 값 바뀌면 그래프 갱신
+        self.date_from.dateChanged.connect(self._rebuild_chart)
+        self.date_to.dateChanged.connect(self._rebuild_chart)
+
         top = QHBoxLayout()
         top.addWidget(QLabel("Color/group by:"), 0)
         top.addWidget(self.mode, 0)
+        top.addSpacing(12)
+        top.addWidget(QLabel("From"), 0)
+        top.addWidget(self.date_from, 0)
+        top.addWidget(QLabel("To"), 0)
+        top.addWidget(self.date_to, 0)
         top.addStretch(1)
         top.addWidget(self.btn_export, 0)
 
@@ -1051,6 +1083,29 @@ class HistoryDialog(QDialog):
         self._axis_y: QValueAxis | None = None
 
         self._rebuild_chart()
+
+    def _selected_date_range(self) -> tuple[pd.Timestamp, pd.Timestamp]:
+        d0 = self.date_from.date()
+        d1 = self.date_to.date()
+
+        # 뒤집혔으면 swap
+        if d0 > d1:
+            d0, d1 = d1, d0
+
+        start = pd.Timestamp(year=d0.year(), month=d0.month(), day=d0.day())
+        end = pd.Timestamp(year=d1.year(), month=d1.month(), day=d1.day())
+        return start, end
+
+    def filtered_logs(self) -> pd.DataFrame:
+        if self.df_logs.empty or "date_dt" not in self.df_logs.columns:
+            return self.df_logs
+
+        start, end = self._selected_date_range()
+        df = self.df_logs.copy()
+
+        # date_dt는 날짜(00:00)로 들어있으니 inclusive로 between 가능
+        df = df[df["date_dt"].between(start, end, inclusive="both")].copy()
+        return df
 
     def _unique_colors(self):
         # 기존과 동일 팔레트
@@ -1076,7 +1131,9 @@ class HistoryDialog(QDialog):
         if self.df_logs.empty:
             return [], [], {}
 
-        df = self.df_logs.copy()
+        df = self.filtered_logs().copy()
+        if df.empty:
+            return [], [], {}
         df["date_label"] = df["date_dt"].dt.strftime("%Y-%m-%d")
 
         mode = self.mode.currentText()
@@ -1524,11 +1581,12 @@ class CsvPlotPanel(QWidget):
 
         dlg = HistoryDialog(dfh, parent=self)
 
-        # ✅ Export 버튼 눌렀을 때도 엑셀 저장
         def _export_from_dialog():
-            self.export_history_to_excel(dfh)
+            self.export_history_to_excel(dlg.filtered_logs())  # ✅ 선택 기간만 export
 
         dlg.btn_export.clicked.connect(_export_from_dialog)
+
+        # ✅ 이거 없어서 안 뜨는 거였음
         dlg.exec()
 
     def export_history_to_excel(self, dfh: pd.DataFrame | None = None):
@@ -3093,10 +3151,10 @@ def main():
     logger.info("[APP] starting")
     app = QApplication(sys.argv)
 
-    # root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
-    root_dir = r"C:\hmi\System\RecipeProcLog"
-    # alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
-    alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
+    root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
+    # root_dir = r"C:\hmi\System\RecipeProcLog"
+    alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
+    # alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
 
     logger.info(f"[APP] paths root_dir={root_dir}, alarm_dir={alarm_dir}")
 
