@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="225c8168-e893-4b53-808a-a9f4aedbaaf5" name="변경" comment="compare mode can be activated in various graph areas">
+    <list default="true" id="225c8168-e893-4b53-808a-a9f4aedbaaf5" name="변경" comment="Graph &amp; container minimum size bug fixed">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
@@ -114,7 +114,10 @@
       <workItem from="1771862102456" duration="2987000" />
       <workItem from="1771868415587" duration="274000" />
       <workItem from="1771868732391" duration="20000" />
-      <workItem from="1771868898271" duration="1881000" />
+      <workItem from="1771868898271" duration="5156000" />
+      <workItem from="1771943061331" duration="3541000" />
+      <workItem from="1772133886836" duration="1709000" />
+      <workItem from="1772202543762" duration="3041000" />
     </task>
     <task id="LOCAL-00001" summary="New Project">
       <option name="closed" value="true" />
@@ -252,7 +255,15 @@
       <option name="project" value="LOCAL" />
       <updated>1771864126158</updated>
     </task>
-    <option name="localTasksCounter" value="18" />
+    <task id="LOCAL-00018" summary="Graph &amp; container minimum size bug fixed">
+      <option name="closed" value="true" />
+      <created>1771870815186</created>
+      <option name="number" value="00018" />
+      <option name="presentableId" value="LOCAL-00018" />
+      <option name="project" value="LOCAL" />
+      <updated>1771870815186</updated>
+    </task>
+    <option name="localTasksCounter" value="19" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -279,10 +290,11 @@
     <MESSAGE value="Various log comparison mode updated" />
     <MESSAGE value="Y Component select/clear button added on dialog" />
     <MESSAGE value="compare mode can be activated in various graph areas" />
-    <option name="LAST_COMMIT_MESSAGE" value="compare mode can be activated in various graph areas" />
+    <MESSAGE value="Graph &amp; container minimum size bug fixed" />
+    <option name="LAST_COMMIT_MESSAGE" value="Graph &amp; container minimum size bug fixed" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/DFAM$logger.coverage" NAME="logger 커버리지 결과" MODIFIED="1766695351526" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/utils" />
-    <SUITE FILE_PATH="coverage/DFAM$main.coverage" NAME="main 커버리지 결과" MODIFIED="1771870202038" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/DFAM$main.coverage" NAME="main 커버리지 결과" MODIFIED="1772205351637" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
 </project>

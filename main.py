@@ -14,12 +14,16 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QGridLayout, QRubberBand,
     QSizePolicy, QLineEdit,
 )
-
+from PySide6.QtWidgets import QFileDialog
 from PySide6.QtCharts import (
     QChart, QChartView, QLineSeries, QScatterSeries,
-    QValueAxis, QDateTimeAxis
+    QValueAxis, QDateTimeAxis,
+    QBarSeries, QStackedBarSeries, QBarSet, QBarCategoryAxis
 )
 from PySide6.QtWidgets import QGraphicsLineItem, QGraphicsRectItem, QGraphicsEllipseItem
+
+import re
+from dataclasses import dataclass
 
 
 # -----------------------------
@@ -39,6 +43,87 @@ except Exception:
 NONE_ITEM = "(None)"
 
 
+@dataclass(frozen=True)
+class LogMeta:
+    path: Path
+    tube: str
+    recipe: str
+    job_id: str
+    date_str: str   # YYYYMMDD
+    time_str: str   # HHMMSS or HHMM
+    dt: pd.Timestamp | None
+
+
+DATE_RE8 = re.compile(r"^\d{8}$")
+TIME_RE4_6 = re.compile(r"^\d{4}(\d{2})?$")
+
+
+def parse_log_filename(p: Path) -> LogMeta | None:
+    """
+    (튜브)_(레시피명)_(jobID)_(날짜)_(시간).csv
+    레시피명은 '_' 포함 가능하므로 뒤에서부터 파싱한다.
+    """
+    if p.suffix.lower() != ".csv":
+        return None
+
+    parts = p.stem.split("_")
+    if len(parts) < 5:
+        return None
+
+    date_str = parts[-2]
+    time_str = parts[-1]
+    job_id = parts[-3]
+    tube = parts[0]
+    recipe = "_".join(parts[1:-3]).strip()
+
+    if not DATE_RE8.match(date_str):
+        return None
+    if not TIME_RE4_6.match(time_str):
+        return None
+
+    # dt 생성(가능하면)
+    dt = None
+    try:
+        if len(time_str) == 4:
+            fmt = "%Y%m%d%H%M"
+        else:
+            fmt = "%Y%m%d%H%M%S"
+        dt = pd.to_datetime(date_str + time_str, format=fmt, errors="coerce")
+        if pd.isna(dt):
+            dt = None
+    except Exception:
+        dt = None
+
+    return LogMeta(path=p, tube=tube, recipe=recipe, job_id=job_id, date_str=date_str, time_str=time_str, dt=dt)
+
+
+def scan_logs(root_dir: Path) -> pd.DataFrame:
+    """
+    root_dir 하위 모든 csv를 스캔해서 파일명 기반 메타를 DataFrame으로 반환.
+    columns: path, tube, recipe, job_id, date, time, dt
+    """
+    rows = []
+    for p in root_dir.rglob("*.csv"):
+        meta = parse_log_filename(p)
+        if meta is None:
+            continue
+        rows.append({
+            "path": str(meta.path),
+            "tube": meta.tube,
+            "recipe": meta.recipe,
+            "job_id": meta.job_id,
+            "date": meta.date_str,   # YYYYMMDD
+            "time": meta.time_str,
+            "dt": meta.dt,
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    # 날짜 정렬을 위한 컬럼
+    df["date_dt"] = pd.to_datetime(df["date"], format="%Y%m%d", errors="coerce")
+    df = df.dropna(subset=["date_dt"]).sort_values(["date_dt", "tube", "recipe", "job_id"]).reset_index(drop=True)
+    return df
 # =========================================================
 # Sticky tooltip widget (custom)
 # =========================================================
@@ -672,7 +757,32 @@ class PlotArea:
             on_pick_right=lambda: self.parent_panel._open_y_columns_dialog(side="right", area=self),
         )
 
+        self.btn_history = QPushButton("History")
+        self.btn_history.setToolTip("Show runs per day (by date)")
+        self.btn_history.setFixedHeight(22)
+        self.btn_history.setCursor(Qt.PointingHandCursor)
+        self.btn_history.setStyleSheet(
+            "QPushButton{border:1px solid rgba(0,0,0,0.2); border-radius:6px; background:rgba(255,255,255,0.85); padding:0px 10px;}"
+            "QPushButton:hover{background:rgba(255,255,255,1.0);}"
+            "QPushButton:pressed{background:rgba(230,230,230,1.0);}"
+        )
+        self.btn_history.clicked.connect(lambda: self.parent_panel.request_history_for_area(self))
+
+        self.btn_export = QPushButton("Export")
+        self.btn_export.setVisible(False)  # ✅ top bar Export 숨김 (History dialog에서만 Export 제공)
+        self.btn_export.setToolTip("Export raw data & summaries to Excel")
+        self.btn_export.setFixedHeight(22)
+        self.btn_export.setCursor(Qt.PointingHandCursor)
+        self.btn_export.setStyleSheet(
+            "QPushButton{border:1px solid rgba(0,0,0,0.2); border-radius:6px; background:rgba(255,255,255,0.85); padding:0px 10px;}"
+            "QPushButton:hover{background:rgba(255,255,255,1.0);}"
+            "QPushButton:pressed{background:rgba(230,230,230,1.0);}"
+        )
+        self.btn_export.clicked.connect(lambda: self.parent_panel.request_export_for_area(self))
+
         topbar.addWidget(self.titlebar, 1)
+        topbar.addWidget(self.btn_history, 0, Qt.AlignRight)  # ✅ 추가
+        # topbar.addWidget(self.btn_export, 0, Qt.AlignRight)  # ✅ 추가
         topbar.addWidget(self.btn_compare, 0, Qt.AlignRight)
         topbar.addWidget(self.btn_delete, 0, Qt.AlignRight)
 
@@ -877,6 +987,234 @@ class PlotArea:
             self.view.tip_alarm.set_target_hovering(False)
 
 
+class HistoryChartView(QChartView):
+    def __init__(self, chart: QChart, parent=None):
+        super().__init__(chart, parent)
+        self.setRenderHint(QPainter.Antialiasing, True)
+        self.setMouseTracking(True)
+
+        # ✅ 기존 StickyTip 재사용 (cross 스타일로 써도 되고, 필요하면 kind="alarm"로)
+        self.tip = StickyTip(self, kind="cross")
+
+    def hide_tip(self):
+        self.tip.hide_tip()
+        self.tip.set_target_hovering(False)
+
+    def leaveEvent(self, e):
+        self.hide_tip()
+        super().leaveEvent(e)
+
+
+class HistoryDialog(QDialog):
+    """
+    날짜별 공정 횟수 표시 (Total / By Tube / By Recipe)
+    - Hover 툴팁: 날짜, 그룹, 수량
+    - Export: 현재 원본/집계 저장(외부에서 호출)
+    """
+    def __init__(self, df_logs: pd.DataFrame, parent=None):
+        super().__init__(parent)
+
+        self.setWindowFlag(Qt.Window, True)  # "대화상자"가 아니라 일반 윈도우 취급
+        self.setWindowFlag(Qt.WindowMinMaxButtonsHint, True)
+        self.setWindowFlag(Qt.WindowCloseButtonHint, True)
+
+        self.setWindowTitle("History (Runs per day)")
+        self.resize(980, 560)
+
+        self.df_logs = df_logs.copy()
+
+        self.mode = QComboBox()
+        self.mode.addItems(["Total", "By Tube", "By Recipe"])
+        self.mode.currentIndexChanged.connect(self._rebuild_chart)
+
+        self.btn_export = QPushButton("Export raw data (Excel)")
+        self.btn_export.setCursor(Qt.PointingHandCursor)
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Color/group by:"), 0)
+        top.addWidget(self.mode, 0)
+        top.addStretch(1)
+        top.addWidget(self.btn_export, 0)
+
+        self.chart = QChart()
+        self.chart.legend().setVisible(True)
+        self.chart.legend().setAlignment(Qt.AlignBottom)
+
+        self.view = HistoryChartView(self.chart)
+
+        lay = QVBoxLayout(self)
+        lay.addLayout(top)
+        lay.addWidget(self.view, 1)
+
+        self._series: QBarSeries | None = None
+        self._axis_x: QBarCategoryAxis | None = None
+        self._axis_y: QValueAxis | None = None
+
+        self._rebuild_chart()
+
+    def _unique_colors(self):
+        # 기존과 동일 팔레트
+        base = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+                "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+        i = 0
+        while True:
+            if i < len(base):
+                yield base[i]
+            else:
+                k = i - len(base)
+                hue = (k * 0.61803398875) % 1.0
+                yield QColor.fromHsvF(hue, 0.55, 0.85).name()
+            i += 1
+
+    def _make_pivot(self) -> tuple[list[str], list[str], dict[str, list[int]]]:
+        """
+        return:
+          dates: ["2026-02-01", ...]
+          groups: ["TUBE01", ...] or ["Total"]
+          data: {group: [count_per_date...]}
+        """
+        if self.df_logs.empty:
+            return [], [], {}
+
+        df = self.df_logs.copy()
+        df["date_label"] = df["date_dt"].dt.strftime("%Y-%m-%d")
+
+        mode = self.mode.currentText()
+        if mode == "By Tube":
+            gcol = "tube"
+        elif mode == "By Recipe":
+            gcol = "recipe"
+        else:
+            gcol = None
+
+        if gcol is None:
+            grp = df.groupby("date_label").size().reset_index(name="cnt")
+            dates = grp["date_label"].tolist()
+            data = {"Total": grp["cnt"].astype(int).tolist()}
+            return dates, ["Total"], data
+
+        pivot = (
+            df.pivot_table(index="date_label", columns=gcol, values="path", aggfunc="count", fill_value=0)
+            .sort_index()
+        )
+        dates = pivot.index.tolist()
+        groups = list(pivot.columns.astype(str))
+
+        data = {g: pivot[g].astype(int).tolist() for g in groups}
+        return dates, groups, data
+
+    def _rebuild_chart(self):
+        self.chart.removeAllSeries()
+        # 축 제거(있으면)
+        for ax in list(self.chart.axes()):
+            try:
+                self.chart.removeAxis(ax)
+            except Exception:
+                pass
+
+        dates, groups, data = self._make_pivot()
+        if not dates:
+            self.chart.setTitle("No logs found")
+            return
+
+        mode = self.mode.currentText()
+        if mode in ("By Tube", "By Recipe"):
+            series = QStackedBarSeries()  # ✅ 막대 1개 안에 여러 색(세로 누적)
+        else:
+            series = QBarSeries()  # Total은 단일
+        colors = self._unique_colors()
+
+        # QBarSet per group
+        for g in groups:
+            bs = QBarSet(str(g))
+            c = QColor(next(colors))
+            bs.setBrush(QBrush(c))
+            bs.setColor(c)
+            bs.append([int(v) for v in data[g]])
+
+            # ✅ StickyTip hover
+            def make_hover_handler(barset: QBarSet):
+                def _on_hovered(status: bool, index: int):
+                    if not status:
+                        self.view.hide_tip()
+                        return
+                    if index < 0 or index >= len(dates):
+                        self.view.hide_tip()
+                        return
+
+                    date_label = dates[index]
+                    v = float(barset.at(index))
+                    cnt = int(v)
+
+                    # ✅ stacked면 세그먼트의 중간 y를 계산
+                    y_mid = v
+                    if isinstance(series, QStackedBarSeries):
+                        below = 0.0
+                        # series의 barSets 순서대로 누적되므로, 현재 barset 이전 것들의 합을 구함
+                        for bs2 in series.barSets():
+                            if bs2 is barset:
+                                break
+                            below += float(bs2.at(index))
+                        y_mid = below + v / 2.0
+
+                    msg = f"{date_label}\n{barset.label()} : {cnt}"
+
+                    try:
+                        pos_scene = self.chart.mapToPosition(QPointF(float(index), float(y_mid)), series)
+                        pos_view = self.view.mapFromScene(pos_scene.toPoint())
+                    except Exception:
+                        pos_view = QPoint(self.view.width() // 2, self.view.height() // 2)
+
+                    self.view.tip.set_target_hovering(True)
+                    self.view.tip.show_text_at(msg, pos_view, offset=QPoint(16, -10))
+
+                return _on_hovered
+
+            bs.hovered.connect(make_hover_handler(bs))
+            series.append(bs)
+
+        axis_x = QBarCategoryAxis()
+        axis_x.append([str(d) for d in dates])
+
+        axis_y = QValueAxis()
+        axis_y.setLabelFormat("%d")
+        axis_y.setTickCount(6)
+        axis_y.setMin(0)
+
+        # ✅ y max 계산
+        if isinstance(series, QStackedBarSeries) and groups:
+            # 날짜 index별로 sum을 구해서 그 최대값을 축 max로
+            totals = [0] * len(dates)
+            for g in groups:
+                vals = data.get(g, [])
+                for i, v in enumerate(vals):
+                    if i < len(totals):
+                        totals[i] += int(v)
+            maxv = max(totals) if totals else 0
+        else:
+            # Total(또는 non-stacked)일 때는 기존대로 “단일 값 최대”
+            maxv = 0
+            for g in groups:
+                vals = data.get(g, [])
+                if vals:
+                    maxv = max(maxv, max(vals))
+
+        axis_y.setMax(max(1, int(maxv * 1.15) if maxv > 0 else 1))
+
+        self.chart.addSeries(series)
+        self.chart.addAxis(axis_x, Qt.AlignBottom)
+        self.chart.addAxis(axis_y, Qt.AlignLeft)
+        series.attachAxis(axis_x)
+        series.attachAxis(axis_y)
+
+        self._series = series
+        self._axis_x = axis_x
+        self._axis_y = axis_y
+
+        mode = self.mode.currentText()
+        self.chart.setTitle(f"Runs per day ({mode})")
+
+
 class CompareDialog(QDialog):
     def __init__(self, common_cols: list[str], parent=None):
         super().__init__(parent)
@@ -927,9 +1265,15 @@ class CompareDialog(QDialog):
 # =========================================================
 class CsvPlotPanel(QWidget):
     compareRequested = Signal(object)  # object = PlotArea
+    historyRequested = Signal(object)  # ✅ 추가
+    exportRequested = Signal(object)   # ✅ 추가
 
     def __init__(self, alarm_dir: Path, parent=None):
         super().__init__(parent)
+
+        self.root_dir: Path | None = None  # ✅ MainWindow에서 주입
+        self._history_df_cache: pd.DataFrame | None = None
+        self._history_cache_root: Path | None = None
 
         self.alarm_dir = Path(alarm_dir)
 
@@ -1149,9 +1493,89 @@ class CsvPlotPanel(QWidget):
         self.status.setStyleSheet("color: gray;")
         root.addWidget(self.status)
 
+    def request_history_for_area(self, area: PlotArea):
+        self.historyRequested.emit(area)
+
+    def request_export_for_area(self, area: PlotArea):
+        self.exportRequested.emit(area)
+
     def request_compare_for_area(self, area: PlotArea):
         """PlotArea의 Compare 버튼이 눌렸을 때 MainWindow로 요청을 전달."""
         self.compareRequested.emit(area)
+
+    def _get_history_df(self) -> pd.DataFrame:
+        if self.root_dir is None:
+            return pd.DataFrame()
+        rd = self.root_dir
+
+        if self._history_df_cache is not None and self._history_cache_root == rd:
+            return self._history_df_cache
+
+        dfh = scan_logs(rd)
+        self._history_df_cache = dfh
+        self._history_cache_root = rd
+        return dfh
+
+    def show_history_dialog(self, area: PlotArea | None = None):
+        dfh = self._get_history_df()
+        if dfh.empty:
+            QMessageBox.information(self, "History", "No valid log files found under root_dir.")
+            return
+
+        dlg = HistoryDialog(dfh, parent=self)
+
+        # ✅ Export 버튼 눌렀을 때도 엑셀 저장
+        def _export_from_dialog():
+            self.export_history_to_excel(dfh)
+
+        dlg.btn_export.clicked.connect(_export_from_dialog)
+        dlg.exec()
+
+    def export_history_to_excel(self, dfh: pd.DataFrame | None = None):
+        if dfh is None:
+            dfh = self._get_history_df()
+        if dfh is None or dfh.empty:
+            QMessageBox.information(self, "Export", "No history data to export.")
+            return
+
+        default_name = "Process_history_data.xlsx"
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Excel",
+            str((self.root_dir or Path.cwd()) / default_name),
+            "Excel Files (*.xlsx)"
+        )
+        if not save_path:
+            return
+
+        df = dfh.copy()
+        df["date_label"] = df["date_dt"].dt.strftime("%Y-%m-%d")
+
+        # 집계들
+        daily_total = df.groupby("date_label").size().reset_index(name="runs").sort_values("date_label")
+        daily_by_tube = (
+            df.pivot_table(index="date_label", columns="tube", values="path", aggfunc="count", fill_value=0)
+            .reset_index()
+        )
+        daily_by_recipe = (
+            df.pivot_table(index="date_label", columns="recipe", values="path", aggfunc="count", fill_value=0)
+            .reset_index()
+        )
+
+        try:
+            with pd.ExcelWriter(save_path, engine="openpyxl") as w:
+                # Raw
+                out_cols = ["path", "tube", "recipe", "job_id", "date", "time", "dt"]
+                df[out_cols].to_excel(w, index=False, sheet_name="raw_files")
+
+                daily_total.to_excel(w, index=False, sheet_name="daily_total")
+                daily_by_tube.to_excel(w, index=False, sheet_name="daily_by_tube")
+                daily_by_recipe.to_excel(w, index=False, sheet_name="daily_by_recipe")
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", str(e))
+            return
+
+        QMessageBox.information(self, "Export", f"Saved:\n{save_path}")
 
     @staticmethod
     def _short_compare_label_from_filename(filename: str) -> str:
@@ -2610,6 +3034,9 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.tree)
 
         self.plot_panel = CsvPlotPanel(alarm_dir=self.alarm_dir)
+        self.plot_panel.root_dir = self.root_dir  # ✅ 하드코딩 root_dir 주입
+        self.plot_panel.historyRequested.connect(self.on_history_requested)  # ✅ 추가
+        self.plot_panel.exportRequested.connect(self.on_export_requested)  # ✅ 추가
         self.plot_panel.setMinimumWidth(0)
         self.plot_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.plot_panel.btn_compare.clicked.connect(self.on_compare_selected)
@@ -2619,6 +3046,13 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 6)
         self.setCentralWidget(splitter)
+
+    def on_history_requested(self, area):
+        # area는 현재 그래프(PlotArea)지만, 지금 요구사항은 "전체 로그의 날짜별 횟수"라 area는 참고용
+        self.plot_panel.show_history_dialog(area)
+
+    def on_export_requested(self, area):
+        self.plot_panel.export_history_to_excel()
 
     def on_compare_requested(self, area):
         # 트리에서 선택된 csv들 가져오기
@@ -2659,10 +3093,10 @@ def main():
     logger.info("[APP] starting")
     app = QApplication(sys.argv)
 
-    root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
-    # root_dir = r"C:\hmi\System\RecipeProcLog"
-    alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
-    # alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
+    # root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
+    root_dir = r"C:\hmi\System\RecipeProcLog"
+    # alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
+    alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
 
     logger.info(f"[APP] paths root_dir={root_dir}, alarm_dir={alarm_dir}")
 
