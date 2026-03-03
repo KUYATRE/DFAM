@@ -1560,12 +1560,12 @@ class CsvPlotPanel(QWidget):
         """PlotArea의 Compare 버튼이 눌렸을 때 MainWindow로 요청을 전달."""
         self.compareRequested.emit(area)
 
-    def _get_history_df(self) -> pd.DataFrame:
+    def _get_history_df(self, force: bool = False) -> pd.DataFrame:
         if self.root_dir is None:
             return pd.DataFrame()
         rd = self.root_dir
 
-        if self._history_df_cache is not None and self._history_cache_root == rd:
+        if (not force) and self._history_df_cache is not None and self._history_cache_root == rd:
             return self._history_df_cache
 
         dfh = scan_logs(rd)
@@ -1574,7 +1574,7 @@ class CsvPlotPanel(QWidget):
         return dfh
 
     def show_history_dialog(self, area: PlotArea | None = None):
-        dfh = self._get_history_df()
+        dfh = self._get_history_df(force=True)
         if dfh.empty:
             QMessageBox.information(self, "History", "No valid log files found under root_dir.")
             return
