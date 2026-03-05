@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, QDir, QDateTime, QPoint, QPointF, QRect, QRectF, QMargins, QTimer, Signal, QSize
 from PySide6.QtGui import QPainter, QColor, QPen, QCursor, QBrush
 from PySide6.QtWidgets import (
@@ -3147,18 +3148,36 @@ class MainWindow(QMainWindow):
         self.plot_panel.load_csv(path)
 
 
+def resource_path(rel: str) -> str:
+    if hasattr(sys, "_MEIPASS"):
+        return str(Path(sys._MEIPASS) / rel)
+    return str(Path(__file__).resolve().parent / rel)
+
+
+def set_appusermodel_id(app_id: str):
+    if sys.platform.startswith("win"):
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+
 def main():
     logger.info("[APP] starting")
-    app = QApplication(sys.argv)
 
-    root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
-    # root_dir = r"C:\hmi\System\RecipeProcLog"
-    alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
-    # alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
+    set_appusermodel_id("com.dfam.logplotter")
+
+    icon_path = resource_path("icons/LP_icon_big.ico")
+
+    app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(icon_path))
+
+    # root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
+    root_dir = r"C:\hmi\System\RecipeProcLog"
+    # alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
+    alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
 
     logger.info(f"[APP] paths root_dir={root_dir}, alarm_dir={alarm_dir}")
 
     win = MainWindow(root_dir=root_dir, alarm_dir=alarm_dir)
+    win.setWindowIcon(QIcon(icon_path))
     win.show()
     rc = app.exec()
     logger.info(f"[APP] exit code={rc}")
