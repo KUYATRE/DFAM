@@ -362,6 +362,109 @@ class XRangeDialog(QDialog):
         return (float(self.num_start.value()), float(self.num_end.value()))
 
 
+class RefLineDialog(QDialog):
+    """
+    기준선 설정:
+      - X 기준선(세로선)
+      - Y 기준선(가로선) + 어느 Y축(Left/Right) 기준인지 선택
+    """
+    def __init__(self, *, x_is_datetime: bool, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Reference Lines")
+
+        self.x_is_datetime = x_is_datetime
+
+        self.cb_x = QCheckBox("Show X reference line")
+        self.cb_y = QCheckBox("Show Y reference line")
+        self.cb_x.setChecked(True)
+        self.cb_y.setChecked(False)
+
+        # X 입력
+        self.x_dt = QDateTimeEdit()
+        self.x_dt.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self.x_dt.setCalendarPopup(True)
+
+        self.x_num = QDoubleSpinBox()
+        self.x_num.setDecimals(6)
+        self.x_num.setRange(-1e30, 1e30)
+
+        # Y 입력
+        self.y_val = QDoubleSpinBox()
+        self.y_val.setDecimals(6)
+        self.y_val.setRange(-1e30, 1e30)
+
+        self.y_axis_side = QComboBox()
+        self.y_axis_side.addItems(["Left", "Right"])  # 기준 Y축 선택
+
+        form = QFormLayout()
+        form.addRow(self.cb_x)
+        if self.x_is_datetime:
+            form.addRow("X value", self.x_dt)
+        else:
+            form.addRow("X value", self.x_num)
+
+        form.addRow(self.cb_y)
+        form.addRow("Y axis", self.y_axis_side)
+        form.addRow("Y value", self.y_val)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+
+        root = QVBoxLayout(self)
+        root.addLayout(form)
+        root.addWidget(btns)
+
+        # 체크에 따라 enable
+        self.cb_x.toggled.connect(self._sync_enabled)
+        self.cb_y.toggled.connect(self._sync_enabled)
+        self._sync_enabled()
+
+    def _sync_enabled(self):
+        x_on = self.cb_x.isChecked()
+        y_on = self.cb_y.isChecked()
+
+        self.x_dt.setEnabled(x_on and self.x_is_datetime)
+        self.x_num.setEnabled(x_on and (not self.x_is_datetime))
+
+        self.y_axis_side.setEnabled(y_on)
+        self.y_val.setEnabled(y_on)
+
+    def set_initial(self, *, x_value: float | None, y_value: float | None, y_side: str | None,
+                    x_dt_min: QDateTime | None = None, x_dt_max: QDateTime | None = None):
+        # X 초기값
+        if x_value is not None:
+            if self.x_is_datetime:
+                q = QDateTime.fromMSecsSinceEpoch(int(x_value))
+                self.x_dt.setDateTime(q)
+                if x_dt_min is not None:
+                    self.x_dt.setMinimumDateTime(x_dt_min)
+                if x_dt_max is not None:
+                    self.x_dt.setMaximumDateTime(x_dt_max)
+            else:
+                self.x_num.setValue(float(x_value))
+
+        # Y 초기값
+        if y_value is not None:
+            self.y_val.setValue(float(y_value))
+
+        if y_side:
+            self.y_axis_side.setCurrentText("Left" if y_side.lower().startswith("l") else "Right")
+
+    def values(self):
+        x_on = self.cb_x.isChecked()
+        y_on = self.cb_y.isChecked()
+
+        if self.x_is_datetime:
+            x_val = float(self.x_dt.dateTime().toMSecsSinceEpoch())
+        else:
+            x_val = float(self.x_num.value())
+
+        y_val = float(self.y_val.value())
+        side = self.y_axis_side.currentText().lower()  # "left"/"right"
+        return x_on, x_val, y_on, side, y_val
+
+
 class YColumnsDialog(QDialog):
     """Y 축에 그릴 컬럼을 최대 3개까지 선택 (검색 지원)."""
     def __init__(self, title: str, items: list[str], selected: list[str], parent=None):
@@ -490,6 +593,15 @@ class PowerChartView(QChartView):
             ln.setPen(QPen(QColor("gray"), 1))
             ln.setVisible(False)
 
+        # reference lines (red dashed)
+        self._ref_vline = QGraphicsLineItem()
+        self._ref_hline = QGraphicsLineItem()
+        ref_pen = QPen(QColor("red"), 1.3, Qt.DashLine)
+        for ln in (self._ref_vline, self._ref_hline):
+            ln.setZValue(12)
+            ln.setPen(ref_pen)
+            ln.setVisible(False)
+
         # alarm halo (scene item)
         self._alarm_halo = QGraphicsEllipseItem()
         self._alarm_halo.setZValue(11)
@@ -516,7 +628,9 @@ class PowerChartView(QChartView):
 
     def _ensure_scene_items(self):
         sc = self.chart().scene()
-        for it in (self._band_bottom, self._band_left, self._band_right, self._vline, self._hline, self._alarm_halo):
+        for it in (self._band_bottom, self._band_left, self._band_right,
+                   self._vline, self._hline, self._alarm_halo,
+                   self._ref_vline, self._ref_hline):
             if it.scene() is None:
                 sc.addItem(it)
 
@@ -524,6 +638,63 @@ class PowerChartView(QChartView):
         super().resizeEvent(e)
         self._ensure_scene_items()
         self._layout_bands()
+        self.area.update_reference_lines()  # ✅ 추가
+
+    def mouseDoubleClickEvent(self, e):
+        # plot 영역에서만 동작
+        if not self._plot_contains(e.position().toPoint()):
+            return super().mouseDoubleClickEvent(e)
+
+        # 클릭 위치를 기준으로 초기값 계산
+        pa = self.chart().plotArea()
+        p_scene = self.mapToScene(e.position().toPoint())
+
+        # X 값
+        x_val = None
+        ref = self.area._ref_series_for_mapping()
+        if ref is not None:
+            try:
+                v = self.chart().mapToValue(QPointF(p_scene.x(), pa.center().y()), ref)
+                x_val = float(v.x())
+            except Exception:
+                x_val = None
+
+        # Y 값 (기본은 left 기준으로)
+        y_val = None
+        y_side = "left"
+        ref_y = self.area._ref_series_for_left()
+        if ref_y is not None:
+            try:
+                v2 = self.chart().mapToValue(QPointF(pa.center().x(), p_scene.y()), ref_y)
+                y_val = float(v2.y())
+            except Exception:
+                y_val = None
+
+        x_is_dt = (self.area.parent_panel.x_is_datetime and (not self.area.compare_active))
+        dlg = RefLineDialog(x_is_datetime=x_is_dt, parent=self)
+        # datetime이면 full range(min/max)도 같이 주면 편함
+        x_dt_min = None
+        x_dt_max = None
+        if x_is_dt:  # ✅ dlg에 맞춰서
+            x_dt_min = self.area.parent_panel._full_x_min_dt
+            x_dt_max = self.area.parent_panel._full_x_max_dt
+
+        dlg.set_initial(x_value=x_val, y_value=y_val, y_side=y_side, x_dt_min=x_dt_min, x_dt_max=x_dt_max)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        x_on, x_value, y_on, side, y_value = dlg.values()
+
+        self.area.ref_x_on = bool(x_on)
+        self.area.ref_x_value = float(x_value)
+
+        self.area.ref_y_on = bool(y_on)
+        self.area.ref_y_side = str(side)
+        self.area.ref_y_value = float(y_value)
+
+        self.area.update_reference_lines()
+        return
 
     def _layout_bands(self):
         pa: QRectF = self.chart().plotArea()
@@ -812,6 +983,77 @@ class PlotArea:
         self.compare_active: bool = False
         self.compare_full_xmin: float | None = None
         self.compare_full_xmax: float | None = None
+        self.compare_x_mode: str = ""
+
+        # reference line state
+        self.ref_x_on: bool = False
+        self.ref_y_on: bool = False
+        self.ref_x_value: float = 0.0      # x axis value (ms if datetime / numeric if not)
+        self.ref_y_value: float = 0.0      # y axis value
+        self.ref_y_side: str = "left"      # "left" or "right"
+
+    def _ref_series_for_left(self):
+        if self.left_series:
+            return self.left_series[0]
+        if self.right_series:
+            return self.right_series[0]
+        if self.alarm_series:
+            return self.alarm_series
+        return None
+
+    def _ref_series_for_right(self):
+        if self.right_series:
+            return self.right_series[0]
+        if self.left_series:
+            return self.left_series[0]
+        if self.alarm_series:
+            return self.alarm_series
+        return None
+
+    def update_reference_lines(self):
+        """현재 ref_x/ref_y 설정값을 기준으로 붉은 점선 위치 업데이트."""
+        v = self.view
+        v._ensure_scene_items()
+
+        pa = self.chart.plotArea()
+
+        # X ref (vertical)
+        if self.ref_x_on:
+            ref_series = self._ref_series_for_mapping()
+            if ref_series is not None:
+                try:
+                    pos = self.chart.mapToPosition(QPointF(float(self.ref_x_value), 0.0), ref_series)
+                    x_scene = pos.x()
+                    x_scene = max(pa.left(), min(pa.right(), x_scene))
+                    v._ref_vline.setLine(x_scene, pa.top(), x_scene, pa.bottom())
+                    v._ref_vline.setVisible(True)
+                except Exception:
+                    v._ref_vline.setVisible(False)
+            else:
+                v._ref_vline.setVisible(False)
+        else:
+            v._ref_vline.setVisible(False)
+
+        # Y ref (horizontal)
+        if self.ref_y_on:
+            # 어느 축(Left/Right) 기준인지 선택
+            ref_series_y = self._ref_series_for_left() if self.ref_y_side == "left" else self._ref_series_for_right()
+            if ref_series_y is not None:
+                try:
+                    # y만 고정해서 mapToPosition 계산: x는 plot 중심값을 쓰면 안정적
+                    # (주의: mapToPosition은 series의 축에 의해 결정됨)
+                    # 일단 series 기반으로 y 맵핑을 얻어오고, x는 plot 범위 전체로 라인을 긋는다.
+                    pos = self.chart.mapToPosition(QPointF(0.0, float(self.ref_y_value)), ref_series_y)
+                    y_scene = pos.y()
+                    y_scene = max(pa.top(), min(pa.bottom(), y_scene))
+                    v._ref_hline.setLine(pa.left(), y_scene, pa.right(), y_scene)
+                    v._ref_hline.setVisible(True)
+                except Exception:
+                    v._ref_hline.setVisible(False)
+            else:
+                v._ref_hline.setVisible(False)
+        else:
+            v._ref_hline.setVisible(False)
 
     def _find_nearest_y(self, series: QLineSeries, x: float) -> float | None:
         try:
@@ -841,22 +1083,35 @@ class PlotArea:
             return ""
 
         lines: list[str] = []
-        if self.parent_panel.x_is_datetime:
-            qdt = QDateTime.fromMSecsSinceEpoch(int(x))
-            lines.append(qdt.toString("yyyy-MM-dd HH:mm:ss"))
 
-            # ✅ Step No / Step Name 추가
-            sn, sname = self.parent_panel._step_info_at_x_value(x)
-            if sn or sname:
-                if sn and sname:
-                    lines.append(f"Step: {sn} | {sname}")
-                elif sn:
-                    lines.append(f"Step: {sn}")
-                else:
-                    lines.append(f"Step: {sname}")
+        # ✅ 핵심: Compare 모드는 datetime 해석 금지. Δt/Index로 표시.
+        if self.compare_active:
+            xm = (self.compare_x_mode or "").lower()
+            if "elapsed" in xm or "Δt" in self.compare_x_mode:
+                # x는 seconds
+                lines.append(f"Elapsed : {int(x)} s")
+            else:
+                # x는 index (float로 들어올 수 있으니 반올림/정수화)
+                idx = int(round(x))
+                lines.append(f"Index : {idx}")
         else:
-            lines.append(f"X = {x:.6g}")
+            # ----- 기존 normal mode 로직 -----
+            if self.parent_panel.x_is_datetime:
+                qdt = QDateTime.fromMSecsSinceEpoch(int(x))
+                lines.append(qdt.toString("yyyy-MM-dd HH:mm:ss"))
 
+                sn, sname = self.parent_panel._step_info_at_x_value(x)
+                if sn or sname:
+                    if sn and sname:
+                        lines.append(f"Step: {sn} | {sname}")
+                    elif sn:
+                        lines.append(f"Step: {sn}")
+                    else:
+                        lines.append(f"Step: {sname}")
+            else:
+                lines.append(f"X = {x:.6g}")
+
+        # ----- 아래 Left/Right Y 값 표시는 그대로 재사용 -----
         if self.left_series:
             lines.append("")
             lines.append("[Left]")
@@ -930,6 +1185,22 @@ class PlotArea:
         self._alarm_hovering = False
 
         self.titlebar.setText("—")
+
+        self.compare_active = False
+        self.compare_full_xmin = None
+        self.compare_full_xmax = None
+        self.compare_x_mode = ""
+
+        self.ref_x_on = False
+        self.ref_y_on = False
+        self.ref_x_value = 0.0
+        self.ref_y_value = 0.0
+        self.ref_y_side = "left"
+        try:
+            self.view._ref_vline.setVisible(False)
+            self.view._ref_hline.setVisible(False)
+        except Exception:
+            pass
 
     def _alarm_text_from_key(self, key_ms: int) -> str:
         infos = self._alarm_map.get(key_ms)
@@ -1791,6 +2062,8 @@ class CsvPlotPanel(QWidget):
         if area not in self._areas:
             area = self._areas[0]
         area.clear()
+
+        area.compare_x_mode = x_mode
 
         chart = area.chart
         chart.legend().setVisible(True)
@@ -2700,6 +2973,8 @@ class CsvPlotPanel(QWidget):
             self.num_start.setValue(float(xmin))
             self.num_end.setValue(float(xmax))
 
+        area.update_reference_lines()
+
         self.plot()
 
     @staticmethod
@@ -2987,6 +3262,7 @@ class CsvPlotPanel(QWidget):
                 alarm.hovered.connect(area.on_alarm_hovered)
 
             area.view._layout_bands()
+            area.update_reference_lines()
 
         self.status.setText(
             f"표시 중: {len(df)} rows | Graphs={len(self._areas)} | (ResetZoom=전체복귀 · X click=range · X drag=zoom(>=2s) · Y band=scale)"
@@ -3169,10 +3445,10 @@ def main():
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(icon_path))
 
-    # root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
-    root_dir = r"C:\hmi\System\RecipeProcLog"
-    # alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
-    alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
+    root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
+    # root_dir = r"C:\hmi\System\RecipeProcLog"
+    alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
+    # alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
 
     logger.info(f"[APP] paths root_dir={root_dir}, alarm_dir={alarm_dir}")
 
