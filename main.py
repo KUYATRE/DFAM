@@ -28,6 +28,9 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QDate
 from PySide6.QtWidgets import QDateEdit
+from PySide6.QtCore import QSortFilterProxyModel
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QMenu
 
 
 # -----------------------------
@@ -504,10 +507,8 @@ class YColumnsDialog(QDialog):
 # TitleBar
 # =========================================================
 class TitleBar(QWidget):
-    def __init__(self, on_pick_left, on_pick_right, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._on_pick_left = on_pick_left
-        self._on_pick_right = on_pick_right
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 6, 8, 4)
@@ -517,44 +518,15 @@ class TitleBar(QWidget):
         self.lbl.setStyleSheet("font-weight:700;")
         self.lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
 
-        self.btn_left = QPushButton("Main Y components")
-        self.btn_right = QPushButton("Sub Y components")
-        for b in (self.btn_left, self.btn_right):
-            b.setCursor(Qt.PointingHandCursor)
-            b.setFixedHeight(24)
-            b.setStyleSheet(
-                "QPushButton{padding:2px 10px; border:1px solid rgba(0,0,0,0.18);"
-                "border-radius:10px; background:rgba(255,255,255,0.85);}"
-                "QPushButton:hover{background:rgba(255,255,255,1.0);}"
-                "QPushButton:pressed{background:rgba(235,235,235,1.0);}"
-            )
-
-        self.btn_left.clicked.connect(self._on_pick_left)
-        self.btn_right.clicked.connect(self._on_pick_right)
-
         hint = QLabel("X: click=range / drag=zoom · Y band=scale")
         hint.setStyleSheet("color: rgba(0,0,0,0.35); font-size: 11px;")
         hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         lay.addWidget(self.lbl, 1)
-        lay.addWidget(self.btn_left, 0)
-        lay.addWidget(self.btn_right, 0)
         lay.addWidget(hint, 0)
-
-        self.setCursor(Qt.PointingHandCursor)
 
     def setText(self, t: str):
         self.lbl.setText(t)
-
-    def mousePressEvent(self, e):
-        if e.button() != Qt.LeftButton:
-            return
-        if self.btn_left.geometry().contains(e.position().toPoint()) or self.btn_right.geometry().contains(e.position().toPoint()):
-            return
-        if e.position().x() < self.width() * 0.5:
-            self._on_pick_left()
-        else:
-            self._on_pick_right()
 
 
 # =========================================================
@@ -906,7 +878,7 @@ class PlotArea:
 
         self.btn_delete = QPushButton("✕")
         self.btn_delete.setToolTip("Delete this graph")
-        self.btn_delete.setFixedSize(26, 22)
+        self.btn_delete.setFixedSize(24, 22)
         self.btn_delete.setStyleSheet(
             "QPushButton{border:1px solid rgba(0,0,0,0.2); border-radius:6px; background:rgba(255,255,255,0.85);}"
             "QPushButton:hover{background:rgba(255,255,255,1.0);}"
@@ -914,51 +886,50 @@ class PlotArea:
         )
         self.btn_delete.clicked.connect(lambda: self.parent_panel.delete_graph(self))
 
-        self.btn_compare = QPushButton("Compare")
-        self.btn_compare.setToolTip("Compare selected logs on this graph")
-        self.btn_compare.setFixedHeight(22)
-        self.btn_compare.setStyleSheet(
-            "QPushButton{border:1px solid rgba(0,0,0,0.2); border-radius:6px; background:rgba(255,255,255,0.85); padding:0px 10px;}"
+        self.btn_menu = QPushButton("···")
+        self.btn_menu.setToolTip("Graph menu")
+        self.btn_menu.setFixedSize(24, 22)
+        self.btn_menu.setCursor(Qt.PointingHandCursor)
+        self.btn_menu.setStyleSheet(
+            "QPushButton{"
+            "border:1px solid rgba(0,0,0,0.2);"
+            "border-radius:6px;"
+            "background:rgba(255,255,255,0.85);"
+            "font-size:16px;"
+            "font-weight:bold;"
+            "}"
             "QPushButton:hover{background:rgba(255,255,255,1.0);}"
             "QPushButton:pressed{background:rgba(230,230,230,1.0);}"
-        )
-        self.btn_compare.setCursor(Qt.PointingHandCursor)
-
-        # ✅ 여기서 MainWindow가 선택 파일을 가져오도록 "요청"만 보냄
-        self.btn_compare.clicked.connect(lambda: self.parent_panel.request_compare_for_area(self))
-
-        self.titlebar = TitleBar(
-            on_pick_left=lambda: self.parent_panel._open_y_columns_dialog(side="left", area=self),
-            on_pick_right=lambda: self.parent_panel._open_y_columns_dialog(side="right", area=self),
+            "QPushButton::menu-indicator{image:none;width:0px;}"
         )
 
-        self.btn_history = QPushButton("History")
-        self.btn_history.setToolTip("Show runs per day (by date)")
-        self.btn_history.setFixedHeight(22)
-        self.btn_history.setCursor(Qt.PointingHandCursor)
-        self.btn_history.setStyleSheet(
-            "QPushButton{border:1px solid rgba(0,0,0,0.2); border-radius:6px; background:rgba(255,255,255,0.85); padding:0px 10px;}"
-            "QPushButton:hover{background:rgba(255,255,255,1.0);}"
-            "QPushButton:pressed{background:rgba(230,230,230,1.0);}"
-        )
-        self.btn_history.clicked.connect(lambda: self.parent_panel.request_history_for_area(self))
+        self.menu = QMenu(self.btn_menu)
 
-        self.btn_export = QPushButton("Export")
-        self.btn_export.setVisible(False)  # ✅ top bar Export 숨김 (History dialog에서만 Export 제공)
-        self.btn_export.setToolTip("Export raw data & summaries to Excel")
-        self.btn_export.setFixedHeight(22)
-        self.btn_export.setCursor(Qt.PointingHandCursor)
-        self.btn_export.setStyleSheet(
-            "QPushButton{border:1px solid rgba(0,0,0,0.2); border-radius:6px; background:rgba(255,255,255,0.85); padding:0px 10px;}"
-            "QPushButton:hover{background:rgba(255,255,255,1.0);}"
-            "QPushButton:pressed{background:rgba(230,230,230,1.0);}"
+        self.act_left_cols = QAction("Main Y components", self.menu)
+        self.act_right_cols = QAction("Sub Y components", self.menu)
+        self.act_compare = QAction("Compare", self.menu)
+
+        self.menu.addAction(self.act_left_cols)
+        self.menu.addAction(self.act_right_cols)
+        self.menu.addSeparator()
+        self.menu.addAction(self.act_compare)
+
+        self.act_left_cols.triggered.connect(
+            lambda: self.parent_panel._open_y_columns_dialog(side="left", area=self)
         )
-        self.btn_export.clicked.connect(lambda: self.parent_panel.request_export_for_area(self))
+        self.act_right_cols.triggered.connect(
+            lambda: self.parent_panel._open_y_columns_dialog(side="right", area=self)
+        )
+        self.act_compare.triggered.connect(
+            lambda: self.parent_panel.request_compare_for_area(self)
+        )
+
+        self.btn_menu.setMenu(self.menu)
+
+        self.titlebar = TitleBar()
 
         topbar.addWidget(self.titlebar, 1)
-        topbar.addWidget(self.btn_history, 0, Qt.AlignRight)  # ✅ 추가
-        # topbar.addWidget(self.btn_export, 0, Qt.AlignRight)  # ✅ 추가
-        topbar.addWidget(self.btn_compare, 0, Qt.AlignRight)
+        topbar.addWidget(self.btn_menu, 0, Qt.AlignRight)
         topbar.addWidget(self.btn_delete, 0, Qt.AlignRight)
 
         wlay.addLayout(topbar)
@@ -1648,6 +1619,12 @@ class CsvPlotPanel(QWidget):
         self.btn_compare.setVisible(False)  # ✅ 안 보이게
         # self.btn_compare.clicked.connect(self.compare_selected_files)
         title_row.addWidget(self.btn_compare, 0)
+
+        self.btn_history = QPushButton("History")
+        self.btn_history.setEnabled(True)
+        self.btn_history.setToolTip("Show runs per day (by date)")
+        self.btn_history.clicked.connect(self.show_history_dialog)
+        title_row.addWidget(self.btn_history, 0)
 
         # ✅ Reset Zoom 버튼 추가
         self.btn_reset_zoom = QPushButton("Reset Zoom")
@@ -3269,6 +3246,45 @@ class CsvPlotPanel(QWidget):
         )
 
 
+class TreeFilterProxyModel(QSortFilterProxyModel):
+    """
+    QFileSystemModel용 트리 검색/필터
+    - 파일명/경로 기준으로 필터
+    - 디렉터리는 하위에 매칭 항목이 있으면 표시
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._filter_text = ""
+
+    def setFilterText(self, text: str):
+        self._filter_text = (text or "").strip().lower()
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row, source_parent):
+        if not self._filter_text:
+            return True
+
+        model = self.sourceModel()
+        idx = model.index(source_row, 0, source_parent)
+        if not idx.isValid():
+            return False
+
+        name = str(model.fileName(idx)).lower()
+        path = str(model.filePath(idx)).lower()
+
+        # 자기 자신이 매칭되면 표시
+        if self._filter_text in name or self._filter_text in path:
+            return True
+
+        # 폴더면 하위에 매칭 항목이 있으면 표시
+        if model.isDir(idx):
+            for i in range(model.rowCount(idx)):
+                if self.filterAcceptsRow(i, idx):
+                    return True
+
+        return False
+
+
 class FilterableList(QWidget):
     """
     QListWidget + 검색창(QLineEdit)
@@ -3351,9 +3367,16 @@ class MainWindow(QMainWindow):
         self.model.setNameFilters(["*.csv"])
         self.model.setNameFilterDisables(False)
 
+        self.proxy_model = TreeFilterProxyModel(self)
+        self.proxy_model.setSourceModel(self.model)
+
+        self.tree_search = QLineEdit()
+        self.tree_search.setPlaceholderText("Search files/folders...")
+        self.tree_search.textChanged.connect(self.on_tree_search_changed)
+
         self.tree = QTreeView()
-        self.tree.setModel(self.model)
-        self.tree.setRootIndex(self.model.index(str(self.root_dir)))
+        self.tree.setModel(self.proxy_model)
+        self.tree.setRootIndex(self.proxy_model.mapFromSource(self.model.index(str(self.root_dir))))
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
 
         for col in range(self.model.columnCount()):
@@ -3366,7 +3389,15 @@ class MainWindow(QMainWindow):
         self.tree.doubleClicked.connect(self.on_tree_double_clicked)
         self.tree.setMinimumWidth(240)
         self.tree.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        splitter.addWidget(self.tree)
+
+        left_panel = QWidget()
+        left_lay = QVBoxLayout(left_panel)
+        left_lay.setContentsMargins(0, 0, 0, 0)
+        left_lay.setSpacing(6)
+        left_lay.addWidget(self.tree_search, 0)
+        left_lay.addWidget(self.tree, 1)
+
+        splitter.addWidget(left_panel)
 
         self.plot_panel = CsvPlotPanel(alarm_dir=self.alarm_dir)
         self.plot_panel.root_dir = self.root_dir  # ✅ 하드코딩 root_dir 주입
@@ -3382,6 +3413,14 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 6)
         self.setCentralWidget(splitter)
 
+    def on_tree_search_changed(self, text: str):
+        self.proxy_model.setFilterText(text)
+        if text.strip():
+            self.tree.expandAll()
+        else:
+            self.tree.collapseAll()
+            self.tree.setRootIndex(self.proxy_model.mapFromSource(self.model.index(str(self.root_dir))))
+
     def on_history_requested(self, area):
         # area는 현재 그래프(PlotArea)지만, 지금 요구사항은 "전체 로그의 날짜별 횟수"라 area는 참고용
         self.plot_panel.show_history_dialog(area)
@@ -3394,7 +3433,8 @@ class MainWindow(QMainWindow):
         idxs = self.tree.selectionModel().selectedRows()
         paths = []
         for idx in idxs:
-            p = Path(self.model.filePath(idx))
+            src_idx = self.proxy_model.mapToSource(idx)
+            p = Path(self.model.filePath(src_idx))
             if p.is_file() and p.suffix.lower() == ".csv":
                 paths.append(p)
 
@@ -3407,20 +3447,24 @@ class MainWindow(QMainWindow):
         idxs = self.tree.selectionModel().selectedRows()
         paths = []
         for idx in idxs:
-            p = Path(self.model.filePath(idx))
+            src_idx = self.proxy_model.mapToSource(idx)
+            p = Path(self.model.filePath(src_idx))
             if p.is_file() and p.suffix.lower() == ".csv":
                 paths.append(p)
         if paths:
             self.plot_panel.compare_files(paths)
 
     def on_tree_double_clicked(self, index):
-        path = Path(self.model.filePath(index))
+        src_index = self.proxy_model.mapToSource(index)
+        path = Path(self.model.filePath(src_index))
+
         if path.is_dir():
             if self.tree.isExpanded(index):
                 self.tree.collapse(index)
             else:
                 self.tree.expand(index)
             return
+
         self.plot_panel.load_csv(path)
 
 

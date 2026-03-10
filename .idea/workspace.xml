@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="225c8168-e893-4b53-808a-a9f4aedbaaf5" name="변경" comment="Apply icon for application">
+    <list default="true" id="225c8168-e893-4b53-808a-a9f4aedbaaf5" name="변경" comment="Add function about drawing reference line">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
@@ -132,7 +132,10 @@
       <workItem from="1772735014071" duration="261000" />
       <workItem from="1772735390942" duration="5389000" />
       <workItem from="1772743262897" duration="868000" />
-      <workItem from="1772809686004" duration="3591000" />
+      <workItem from="1772809686004" duration="5333000" />
+      <workItem from="1772834501818" duration="611000" />
+      <workItem from="1773063976487" duration="6729000" />
+      <workItem from="1773153381924" duration="4695000" />
     </task>
     <task id="LOCAL-00001" summary="New Project">
       <option name="closed" value="true" />
@@ -310,7 +313,15 @@
       <option name="project" value="LOCAL" />
       <updated>1772716373558</updated>
     </task>
-    <option name="localTasksCounter" value="23" />
+    <task id="LOCAL-00023" summary="Add function about drawing reference line">
+      <option name="closed" value="true" />
+      <created>1772826282304</created>
+      <option name="number" value="00023" />
+      <option name="presentableId" value="LOCAL-00023" />
+      <option name="project" value="LOCAL" />
+      <updated>1772826282304</updated>
+    </task>
+    <option name="localTasksCounter" value="24" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -342,10 +353,11 @@
     <MESSAGE value="Historical view period selection function updated" />
     <MESSAGE value="Automatically update process run history" />
     <MESSAGE value="Apply icon for application" />
-    <option name="LAST_COMMIT_MESSAGE" value="Apply icon for application" />
+    <MESSAGE value="Add function about drawing reference line" />
+    <option name="LAST_COMMIT_MESSAGE" value="Add function about drawing reference line" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/DFAM$logger.coverage" NAME="logger 커버리지 결과" MODIFIED="1766695351526" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/utils" />
-    <SUITE FILE_PATH="coverage/DFAM$main.coverage" NAME="main 커버리지 결과" MODIFIED="1772810397797" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/DFAM$main.coverage" NAME="main 커버리지 결과" MODIFIED="1773168511949" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
 </project>
