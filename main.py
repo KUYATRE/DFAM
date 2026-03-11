@@ -1,11 +1,17 @@
 import sys
 from pathlib import Path
+import re
+from dataclasses import dataclass
 
 import pandas as pd
 
-from PySide6.QtGui import QIcon
-from PySide6.QtCore import Qt, QDir, QDateTime, QPoint, QPointF, QRect, QRectF, QMargins, QTimer, Signal, QSize
-from PySide6.QtGui import QPainter, QColor, QPen, QCursor, QBrush
+from PySide6.QtGui import (
+    QIcon, QAction, QPainter, QColor, QPen, QCursor, QBrush, QPainterPath
+)
+from PySide6.QtCore import (
+    Qt, QDir, QDateTime, QPoint, QPointF, QRect, QRectF,
+    QMargins, QTimer, Signal, QSize, QDate, QSortFilterProxyModel
+)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
     QTreeView, QFileSystemModel, QVBoxLayout, QHBoxLayout,
@@ -13,25 +19,15 @@ from PySide6.QtWidgets import (
     QDateTimeEdit, QDoubleSpinBox, QMessageBox, QCheckBox,
     QDialog, QDialogButtonBox, QFormLayout, QListWidget, QListWidgetItem,
     QAbstractItemView, QGridLayout, QRubberBand,
-    QSizePolicy, QLineEdit,
+    QSizePolicy, QLineEdit, QFileDialog, QDateEdit, QMenu,
+    QGraphicsLineItem, QGraphicsRectItem, QGraphicsEllipseItem,
+    QProxyStyle, QStyle, QGraphicsDropShadowEffect
 )
-from PySide6.QtWidgets import QFileDialog
 from PySide6.QtCharts import (
     QChart, QChartView, QLineSeries, QScatterSeries,
     QValueAxis, QDateTimeAxis,
     QBarSeries, QStackedBarSeries, QBarSet, QBarCategoryAxis
 )
-from PySide6.QtWidgets import QGraphicsLineItem, QGraphicsRectItem, QGraphicsEllipseItem
-
-import re
-from dataclasses import dataclass
-
-from PySide6.QtCore import QDate
-from PySide6.QtWidgets import QDateEdit
-from PySide6.QtCore import QSortFilterProxyModel
-from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QMenu
-
 
 # -----------------------------
 # logger fallback
@@ -65,6 +61,641 @@ DATE_RE8 = re.compile(r"^\d{8}$")
 TIME_RE4_6 = re.compile(r"^\d{4}(\d{2})?$")
 
 
+class DateRangeDialog(QDialog):
+    """History용 날짜 범위 선택 다이얼로그"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Date Range")
+
+        self.date_from = QDateEdit()
+        self.date_from.setCalendarPopup(True)
+        self.date_from.setDisplayFormat("yyyy-MM-dd")
+
+        self.date_to = QDateEdit()
+        self.date_to.setCalendarPopup(True)
+        self.date_to.setDisplayFormat("yyyy-MM-dd")
+
+        form = QFormLayout()
+        form.addRow("From", self.date_from)
+        form.addRow("To", self.date_to)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+
+        root = QVBoxLayout(self)
+        root.addLayout(form)
+        root.addWidget(btns)
+
+        apply_chrome_input_styles(self)
+
+    def set_values(self, d0: QDate, d1: QDate):
+        self.date_from.setDate(d0)
+        self.date_to.setDate(d1)
+
+    def values(self):
+        return self.date_from.date(), self.date_to.date()
+
+
+class MenuSelectButton(QPushButton):
+    selectionChanged = Signal(str)
+
+    def __init__(self, placeholder="Select", parent=None):
+        super().__init__(parent)
+        self._items: list[str] = []
+        self._current_text: str = ""
+        self._placeholder = placeholder
+
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(34)
+
+        # 버튼 기본 폭
+        self.setMinimumWidth(140)
+
+        self.setStyleSheet("""
+        QPushButton {
+            background: white;
+            color: #1f2937;
+            border: 1px solid #d9dee7;
+            border-radius: 10px;
+            padding: 6px 34px 6px 14px;
+            text-align: center;
+        }
+        QPushButton:hover {
+            background: #f8fafc;
+            border: 1px solid #cfd6e2;
+        }
+        QPushButton:focus {
+            border: 1px solid #60a5fa;
+        }
+        QPushButton::menu-indicator {
+            image: none;
+            width: 0px;
+            height: 0px;
+        }
+        """)
+
+        self._menu = QMenu(self)
+        self._menu.setAttribute(Qt.WA_TranslucentBackground)
+        self._menu.setStyleSheet("""
+        QMenu {
+            background: white;
+            color: #1f2937;
+            border: 1px solid #d9dee7;
+            border-radius: 4px;
+            padding: 6px;
+        }
+        QMenu::item {
+            padding: 10px 16px;
+            border-radius: 10px;
+        }
+        QMenu::item:selected {
+            background: #eef4ff;
+        }
+        """)
+        self.setMenu(self._menu)
+        self._refresh_text()
+
+    def showMenu(self):
+        self._menu.setFixedWidth(self.width() + 8)
+        pos = self.mapToGlobal(self.rect().bottomLeft())
+        pos.setY(pos.y() + 2)
+        self._menu.popup(pos)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+
+        color = QColor("#4b5563") if self.isEnabled() else QColor("#9ca3af")
+        pen = QPen(color, 1.8)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+
+        r = self.rect()
+        cx = r.right() - 14
+        cy = r.center().y()
+        w = 8
+        h = 5
+
+        path = QPainterPath()
+        path.moveTo(cx - w / 2, cy - h / 2)
+        path.lineTo(cx, cy + h / 2)
+        path.lineTo(cx + w / 2, cy - h / 2)
+        p.drawPath(path)
+        p.end()
+
+    def clear(self):
+        self._items.clear()
+        self._menu.clear()
+        self._current_text = ""
+        self._refresh_text()
+
+    def addItems(self, items: list[str]):
+        for t in items:
+            self.addItem(t)
+
+    def addItem(self, text: str):
+        txt = str(text)
+        self._items.append(txt)
+        act = QAction(txt, self._menu)
+        act.triggered.connect(lambda checked=False, v=txt: self.setCurrentText(v))
+        self._menu.addAction(act)
+
+        if not self._current_text:
+            self._current_text = txt
+            self._refresh_text()
+
+    def currentText(self) -> str:
+        return self._current_text
+
+    def setCurrentText(self, text: str):
+        txt = str(text)
+        if txt not in self._items and txt != "":
+            return
+        changed = (self._current_text != txt)
+        self._current_text = txt
+        self._refresh_text()
+        if changed:
+            self.selectionChanged.emit(self._current_text)
+
+    def setPlaceholderText(self, text: str):
+        self._placeholder = str(text)
+        self._refresh_text()
+
+    def _refresh_text(self):
+        self.setText(self._current_text if self._current_text else self._placeholder)
+
+
+class ChromeProxyStyle(QProxyStyle):
+    """
+    ComboBox / DateEdit / DateTimeEdit / DoubleSpinBox 의
+    화살표를 크롬 느낌의 chevron 으로 직접 그린다.
+    앱 전체에 한 번만 적용해서 사용한다.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def drawPrimitive(self, element, option, painter, widget=None):
+        spin_up = getattr(QStyle, "PE_IndicatorSpinUp", None)
+        spin_down = getattr(QStyle, "PE_IndicatorSpinDown", None)
+
+        arrow_elements = {
+            QStyle.PE_IndicatorArrowDown,
+            QStyle.PE_IndicatorArrowUp,
+            QStyle.PE_IndicatorArrowLeft,
+            QStyle.PE_IndicatorArrowRight,
+        }
+        if spin_up is not None:
+            arrow_elements.add(spin_up)
+        if spin_down is not None:
+            arrow_elements.add(spin_down)
+
+        if element in arrow_elements:
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+
+            r = option.rect.adjusted(2, 2, -2, -2)
+
+            color = QColor("#4b5563")
+            if option.state & QStyle.State_MouseOver:
+                color = QColor("#374151")
+            if option.state & QStyle.State_Sunken:
+                color = QColor("#111827")
+            if not (option.state & QStyle.State_Enabled):
+                color = QColor("#9ca3af")
+
+            pen = QPen(color, 1.8)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+
+            cx = r.center().x()
+            cy = r.center().y()
+
+            w = max(6, min(10, r.width() - 4))
+            h = max(4, min(7, r.height() - 4))
+
+            path = QPainterPath()
+
+            if element in (QStyle.PE_IndicatorArrowDown, spin_down):
+                path.moveTo(cx - w / 2, cy - h / 3)
+                path.lineTo(cx, cy + h / 2)
+                path.lineTo(cx + w / 2, cy - h / 3)
+
+            elif element in (QStyle.PE_IndicatorArrowUp, spin_up):
+                path.moveTo(cx - w / 2, cy + h / 3)
+                path.lineTo(cx, cy - h / 2)
+                path.lineTo(cx + w / 2, cy + h / 3)
+
+            elif element == QStyle.PE_IndicatorArrowLeft:
+                path.moveTo(cx + w / 3, cy - h / 2)
+                path.lineTo(cx - w / 2, cy)
+                path.lineTo(cx + w / 3, cy + h / 2)
+
+            elif element == QStyle.PE_IndicatorArrowRight:
+                path.moveTo(cx - w / 3, cy - h / 2)
+                path.lineTo(cx + w / 2, cy)
+                path.lineTo(cx - w / 3, cy + h / 2)
+
+            painter.drawPath(path)
+            painter.restore()
+            return
+
+        super().drawPrimitive(element, option, painter, widget)
+
+def chrome_combo_style() -> str:
+    return """
+    QComboBox {
+        background: white;
+        color: #1f2937;
+        border: 1px solid #d9dee7;
+        border-radius: 10px;
+        padding: 6px 30px 6px 10px;
+        min-height: 18px;
+    }
+
+    QComboBox:hover {
+        background: #f8fafc;
+        border: 1px solid #cfd6e2;
+    }
+
+    QComboBox:focus {
+        border: 1px solid #60a5fa;
+    }
+
+    QComboBox::drop-down {
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+        width: 24px;
+        border: none;
+        margin: 2px 4px 2px 0px;
+        border-radius: 8px;
+        background: transparent;
+    }
+
+    QComboBox::drop-down:hover {
+        background: #eef2f7;
+    }
+
+    QComboBox::drop-down:pressed {
+        background: #e5e7eb;
+    }
+
+    QComboBox::down-arrow {
+        image: none;
+        width: 10px;
+        height: 10px;
+    }
+
+    QComboBox QAbstractItemView {
+        background: white;
+        color: #1f2937;
+        border: 1px solid #d9dee7;
+        border-radius: 10px;
+        padding: 4px;
+        selection-background-color: #eaf2ff;
+        selection-color: #111827;
+        outline: 0;
+    }
+    """
+
+def chrome_dateedit_style() -> str:
+    return """
+    QDateEdit, QDateTimeEdit {
+        background: white;
+        color: #1f2937;
+        border: 1px solid #d9dee7;
+        border-radius: 10px;
+        padding: 6px 30px 6px 10px;
+        min-height: 18px;
+    }
+
+    QDateEdit:hover, QDateTimeEdit:hover {
+        background: #f8fafc;
+        border: 1px solid #cfd6e2;
+    }
+
+    QDateEdit:focus, QDateTimeEdit:focus {
+        border: 1px solid #60a5fa;
+    }
+
+    QDateEdit::drop-down, QDateTimeEdit::drop-down {
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+        width: 24px;
+        border: none;
+        margin: 2px 4px 2px 0px;
+        border-radius: 8px;
+        background: transparent;
+    }
+
+    QDateEdit::drop-down:hover, QDateTimeEdit::drop-down:hover {
+        background: #eef2f7;
+    }
+
+    QDateEdit::drop-down:pressed, QDateTimeEdit::drop-down:pressed {
+        background: #e5e7eb;
+    }
+
+    QDateEdit::down-arrow, QDateTimeEdit::down-arrow {
+        image: none;
+        width: 10px;
+        height: 10px;
+    }
+    """
+
+def chrome_spinbox_style() -> str:
+    return """
+    QDoubleSpinBox {
+        background: white;
+        color: #1f2937;
+        border: 1px solid #d9dee7;
+        border-radius: 10px;
+        padding: 6px 28px 6px 10px;
+        min-height: 18px;
+    }
+
+    QDoubleSpinBox:hover {
+        background: #f8fafc;
+        border: 1px solid #cfd6e2;
+    }
+
+    QDoubleSpinBox:focus {
+        border: 1px solid #60a5fa;
+    }
+
+    QDoubleSpinBox::up-button {
+        subcontrol-origin: border;
+        subcontrol-position: top right;
+        width: 22px;
+        border: none;
+        margin: 2px 4px 1px 0px;
+        border-top-right-radius: 8px;
+        background: transparent;
+    }
+
+    QDoubleSpinBox::down-button {
+        subcontrol-origin: border;
+        subcontrol-position: bottom right;
+        width: 22px;
+        border: none;
+        margin: 1px 4px 2px 0px;
+        border-bottom-right-radius: 8px;
+        background: transparent;
+    }
+
+    QDoubleSpinBox::up-button:hover,
+    QDoubleSpinBox::down-button:hover {
+        background: #eef2f7;
+    }
+
+    QDoubleSpinBox::up-button:pressed,
+    QDoubleSpinBox::down-button:pressed {
+        background: #e5e7eb;
+    }
+
+    QDoubleSpinBox::up-arrow,
+    QDoubleSpinBox::down-arrow {
+        image: none;
+        width: 10px;
+        height: 10px;
+    }
+    """
+
+def apply_chrome_input_styles(root: QWidget):
+    date_css = chrome_dateedit_style()
+    spin_css = chrome_spinbox_style()
+
+    for w in root.findChildren(QDateEdit):
+        w.setStyleSheet(date_css)
+
+    for w in root.findChildren(QDateTimeEdit):
+        w.setStyleSheet(date_css)
+
+    for w in root.findChildren(QDoubleSpinBox):
+        w.setStyleSheet(spin_css)
+
+
+def build_app_stylesheet() -> str:
+    return """
+    QWidget {
+        background: #f5f6f8;
+        color: #1f2937;
+        font-size: 12px;
+    }
+
+    QMainWindow, QSplitter, QStackedWidget {
+        background: #f5f6f8;
+    }
+
+    QLabel {
+        background: transparent;
+        color: #1f2937;
+    }
+
+    QLineEdit, QComboBox, QDateTimeEdit, QDateEdit, QDoubleSpinBox, QListWidget {
+        background: white;
+        color: #1f2937;
+        border: 1px solid #d9dee7;
+        border-radius: 10px;
+        padding: 6px 8px;
+        selection-background-color: #dbeafe;
+    }
+
+    QLineEdit:focus, QComboBox:focus, QDateTimeEdit:focus, QDateEdit:focus, QDoubleSpinBox:focus, QListWidget:focus {
+        border: 1px solid #60a5fa;
+    }
+
+    QPushButton {
+        background: white;
+        color: #1f2937;
+        border: 1px solid #d9dee7;
+        border-radius: 10px;
+        padding: 7px 12px;
+        font-weight: 600;
+    }
+
+    QPushButton:hover {
+        background: #f8fafc;
+    }
+
+    QPushButton:pressed {
+        background: #eef2f7;
+    }
+
+    QPushButton:disabled {
+        background: #f3f4f6;
+        color: #9ca3af;
+        border: 1px solid #e5e7eb;
+    }
+
+    QTreeView {
+        background: white;
+        color: #1f2937;
+        border: 1px solid #d9dee7;
+        border-radius: 14px;
+        alternate-background-color: #f8fafc;
+        padding: 4px;
+    }
+
+    QTreeView::item {
+        padding: 6px 4px;
+    }
+
+    QTreeView::item:selected {
+        background: #eaf2ff;
+        color: #111827;
+    }
+
+    QHeaderView::section {
+        background: #f8fafc;
+        border: none;
+        border-bottom: 1px solid #e5e7eb;
+        padding: 8px;
+        font-weight: 600;
+        color: #6b7280;
+    }
+
+    QMenu {
+        background: white;
+        color: #1f2937;
+        border: 1px solid #d9dee7;
+        border-radius: 12px;
+        padding: 6px;
+    }
+
+    QMenu::item {
+        padding: 8px 14px;
+        border-radius: 8px;
+    }
+
+    QMenu::item:selected {
+        background: #eef4ff;
+    }
+
+    QDialog {
+        background: #f8fafc;
+        color: #1f2937;
+    }
+
+    QDialog QLabel {
+        background: transparent;
+        color: #1f2937;
+    }
+
+    QDialog QCheckBox {
+        background: transparent;
+        color: #1f2937;
+    }
+
+    QDialog QComboBox,
+    QDialog QLineEdit,
+    QDialog QDateTimeEdit,
+    QDialog QDateEdit,
+    QDialog QDoubleSpinBox,
+    QDialog QListWidget {
+        background: white;
+        color: #1f2937;
+        border: 1px solid #d9dee7;
+        border-radius: 10px;
+        padding: 6px 8px;
+    }
+
+    QDialogButtonBox QPushButton {
+        min-width: 88px;
+    }
+
+    /* ----------------------------- */
+    /* Chrome-like ScrollBar */
+    /* ----------------------------- */
+
+    QScrollBar:vertical {
+        background: transparent;
+        width: 12px;
+        margin: 4px 2px 4px 2px;
+    }
+
+    QScrollBar::handle:vertical {
+        background: rgba(120, 130, 145, 0.55);
+        min-height: 28px;
+        border-radius: 6px;
+    }
+
+    QScrollBar::handle:vertical:hover {
+        background: rgba(95, 105, 120, 0.78);
+    }
+
+    QScrollBar::handle:vertical:pressed {
+        background: rgba(70, 80, 95, 0.88);
+    }
+
+    QScrollBar::add-line:vertical,
+    QScrollBar::sub-line:vertical {
+        height: 0px;
+        background: transparent;
+        border: none;
+    }
+
+    QScrollBar::add-page:vertical,
+    QScrollBar::sub-page:vertical {
+        background: transparent;
+    }
+
+    QScrollBar:horizontal {
+        background: transparent;
+        height: 12px;
+        margin: 2px 4px 2px 4px;
+    }
+
+    QScrollBar::handle:horizontal {
+        background: rgba(120, 130, 145, 0.55);
+        min-width: 28px;
+        border-radius: 6px;
+    }
+
+    QScrollBar::handle:horizontal:hover {
+        background: rgba(95, 105, 120, 0.78);
+    }
+
+    QScrollBar::handle:horizontal:pressed {
+        background: rgba(70, 80, 95, 0.88);
+    }
+
+    QScrollBar::add-line:horizontal,
+    QScrollBar::sub-line:horizontal {
+        width: 0px;
+        background: transparent;
+        border: none;
+    }
+
+    QScrollBar::add-page:horizontal,
+    QScrollBar::sub-page:horizontal {
+        background: transparent;
+    }
+    """
+
+def apply_shadow(
+    widget: QWidget,
+    blur: float = 22.0,
+    x_offset: float = 0.0,
+    y_offset: float = 4.0,
+    color: QColor | None = None,
+):
+    effect = QGraphicsDropShadowEffect(widget)
+    effect.setBlurRadius(blur)
+    effect.setOffset(x_offset, y_offset)
+    effect.setColor(color or QColor(15, 23, 42, 45))  # 은은한 회색/남색 그림자
+    widget.setGraphicsEffect(effect)
+    return effect
+
 def parse_log_filename(p: Path) -> LogMeta | None:
     """
     (튜브)_(레시피명)_(jobID)_(날짜)_(시간).csv
@@ -88,13 +719,9 @@ def parse_log_filename(p: Path) -> LogMeta | None:
     if not TIME_RE4_6.match(time_str):
         return None
 
-    # dt 생성(가능하면)
     dt = None
     try:
-        if len(time_str) == 4:
-            fmt = "%Y%m%d%H%M"
-        else:
-            fmt = "%Y%m%d%H%M%S"
+        fmt = "%Y%m%d%H%M" if len(time_str) == 4 else "%Y%m%d%H%M%S"
         dt = pd.to_datetime(date_str + time_str, format=fmt, errors="coerce")
         if pd.isna(dt):
             dt = None
@@ -119,18 +746,24 @@ def scan_logs(root_dir: Path) -> pd.DataFrame:
             "tube": meta.tube,
             "recipe": meta.recipe,
             "job_id": meta.job_id,
-            "date": meta.date_str,   # YYYYMMDD
+            "date": meta.date_str,
             "time": meta.time_str,
             "dt": meta.dt,
         })
+
     df = pd.DataFrame(rows)
     if df.empty:
         return df
 
-    # 날짜 정렬을 위한 컬럼
     df["date_dt"] = pd.to_datetime(df["date"], format="%Y%m%d", errors="coerce")
-    df = df.dropna(subset=["date_dt"]).sort_values(["date_dt", "tube", "recipe", "job_id"]).reset_index(drop=True)
+    df = (
+        df.dropna(subset=["date_dt"])
+          .sort_values(["date_dt", "tube", "recipe", "job_id"])
+          .reset_index(drop=True)
+    )
     return df
+
+
 # =========================================================
 # Sticky tooltip widget (custom)
 # =========================================================
@@ -145,7 +778,7 @@ class StickyTip(QWidget):
         super().__init__(parent)
         self.kind = kind
 
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)  # tip 자체 hover 감지
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setMouseTracking(True)
         self.setVisible(False)
 
@@ -164,14 +797,13 @@ class StickyTip(QWidget):
         self.lbl.setTextFormat(Qt.PlainText)
         self.lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
 
-        # 스타일 (필요하면 여기만 조절)
         if kind == "alarm":
             self.lbl.setStyleSheet(
                 "QLabel{"
                 "background: rgba(90,20,20,230);"
                 "color: white;"
                 "border: 1px solid rgba(255,255,255,40);"
-                "border-radius: 8px;"
+                "border-radius: 10px;"
                 "padding: 8px 10px;"
                 "font-size: 11px;"
                 "}"
@@ -182,7 +814,7 @@ class StickyTip(QWidget):
                 "background: rgba(25,25,25,220);"
                 "color: white;"
                 "border: 1px solid rgba(255,255,255,40);"
-                "border-radius: 8px;"
+                "border-radius: 10px;"
                 "padding: 8px 10px;"
                 "font-size: 11px;"
                 "}"
@@ -209,7 +841,6 @@ class StickyTip(QWidget):
         x = pos_in_parent.x() + offset.x()
         y = pos_in_parent.y() + offset.y()
 
-        # parent(view) 영역 밖으로 나가지 않게 clamp
         pw = self.parentWidget().width()
         ph = self.parentWidget().height()
         w = self.width()
@@ -252,12 +883,12 @@ class StickyTip(QWidget):
 # Dialogs
 # =========================================================
 class YScaleDialog(QDialog):
-    """Left/Right Y 축 스케일 설정 다이얼로그 (Auto/Manual + Min/Max). Log UI는 유지하지만 적용 안함."""
+    """Left/Right Y 축 스케일 설정 다이얼로그 (Auto/Manual + Min/Max)."""
     def __init__(self, title: str, mode: str, ymin: float, ymax: float, is_log: bool, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
 
-        self.mode_cb = QComboBox()
+        self.mode_cb = MenuSelectButton("Mode")
         self.mode_cb.addItems(["Auto", "Manual"])
         self.mode_cb.setCurrentText(mode if mode in ("Auto", "Manual") else "Auto")
 
@@ -271,13 +902,13 @@ class YScaleDialog(QDialog):
         self.ymax_sb.setRange(-1e30, 1e30)
         self.ymax_sb.setValue(float(ymax))
 
-        self.log_cb = QComboBox()
+        self.log_cb = MenuSelectButton("Scale")
         self.log_cb.addItems(["Linear", "Log"])
         self.log_cb.setCurrentText("Log" if is_log else "Linear")
 
         form = QFormLayout()
         form.addRow("Mode", self.mode_cb)
-        form.addRow("Scale", self.log_cb)  # UI만(미적용)
+        form.addRow("Scale", self.log_cb)
         form.addRow("Min", self.ymin_sb)
         form.addRow("Max", self.ymax_sb)
 
@@ -289,8 +920,9 @@ class YScaleDialog(QDialog):
         root.addLayout(form)
         root.addWidget(btns)
 
-        self.mode_cb.currentTextChanged.connect(self._sync_enabled)
+        self.mode_cb.selectionChanged.connect(self._sync_enabled)
         self._sync_enabled()
+        apply_chrome_input_styles(self)
 
     def _sync_enabled(self):
         manual = (self.mode_cb.currentText() == "Manual")
@@ -302,7 +934,7 @@ class YScaleDialog(QDialog):
             self.mode_cb.currentText(),
             float(self.ymin_sb.value()),
             float(self.ymax_sb.value()),
-            self.log_cb.currentText() == "Log",  # UI만
+            self.log_cb.currentText() == "Log",
         )
 
 
@@ -345,6 +977,8 @@ class XRangeDialog(QDialog):
         root.addLayout(form)
         root.addWidget(btns)
 
+        apply_chrome_input_styles(self)
+
     def set_dt_values(self, qmin: QDateTime, qmax: QDateTime, cur_start: QDateTime, cur_end: QDateTime):
         self.dt_start.setMinimumDateTime(qmin)
         self.dt_start.setMaximumDateTime(qmax)
@@ -361,8 +995,8 @@ class XRangeDialog(QDialog):
 
     def values(self):
         if self.is_datetime:
-            return (self.dt_start.dateTime(), self.dt_end.dateTime())
-        return (float(self.num_start.value()), float(self.num_end.value()))
+            return self.dt_start.dateTime(), self.dt_end.dateTime()
+        return float(self.num_start.value()), float(self.num_end.value())
 
 
 class RefLineDialog(QDialog):
@@ -373,6 +1007,39 @@ class RefLineDialog(QDialog):
     """
     def __init__(self, *, x_is_datetime: bool, parent=None):
         super().__init__(parent)
+
+        self.setStyleSheet("""
+        QDialog {
+            background: #f8fafc;
+            color: #1f2937;
+        }
+        QLabel, QCheckBox {
+            background: transparent;
+            color: #1f2937;
+        }
+        QComboBox, QDateTimeEdit, QDoubleSpinBox {
+            background: white;
+            color: #1f2937;
+            border: 1px solid #d9dee7;
+            border-radius: 10px;
+            padding: 6px 8px;
+        }
+        QComboBox:focus, QDateTimeEdit:focus, QDoubleSpinBox:focus {
+            border: 1px solid #60a5fa;
+        }
+        QPushButton {
+            background: white;
+            color: #1f2937;
+            border: 1px solid #d9dee7;
+            border-radius: 10px;
+            padding: 7px 12px;
+            font-weight: 600;
+        }
+        QPushButton:hover {
+            background: #f8fafc;
+        }
+        """)
+
         self.setWindowTitle("Reference Lines")
 
         self.x_is_datetime = x_is_datetime
@@ -382,7 +1049,6 @@ class RefLineDialog(QDialog):
         self.cb_x.setChecked(True)
         self.cb_y.setChecked(False)
 
-        # X 입력
         self.x_dt = QDateTimeEdit()
         self.x_dt.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.x_dt.setCalendarPopup(True)
@@ -391,13 +1057,13 @@ class RefLineDialog(QDialog):
         self.x_num.setDecimals(6)
         self.x_num.setRange(-1e30, 1e30)
 
-        # Y 입력
         self.y_val = QDoubleSpinBox()
         self.y_val.setDecimals(6)
         self.y_val.setRange(-1e30, 1e30)
 
-        self.y_axis_side = QComboBox()
-        self.y_axis_side.addItems(["Left", "Right"])  # 기준 Y축 선택
+        self.y_axis_side = MenuSelectButton("Y axis")
+        self.y_axis_side.addItems(["Left", "Right"])
+        self.y_axis_side.setCurrentText("Left")
 
         form = QFormLayout()
         form.addRow(self.cb_x)
@@ -418,10 +1084,10 @@ class RefLineDialog(QDialog):
         root.addLayout(form)
         root.addWidget(btns)
 
-        # 체크에 따라 enable
         self.cb_x.toggled.connect(self._sync_enabled)
         self.cb_y.toggled.connect(self._sync_enabled)
         self._sync_enabled()
+        apply_chrome_input_styles(self)
 
     def _sync_enabled(self):
         x_on = self.cb_x.isChecked()
@@ -429,13 +1095,18 @@ class RefLineDialog(QDialog):
 
         self.x_dt.setEnabled(x_on and self.x_is_datetime)
         self.x_num.setEnabled(x_on and (not self.x_is_datetime))
-
         self.y_axis_side.setEnabled(y_on)
         self.y_val.setEnabled(y_on)
 
-    def set_initial(self, *, x_value: float | None, y_value: float | None, y_side: str | None,
-                    x_dt_min: QDateTime | None = None, x_dt_max: QDateTime | None = None):
-        # X 초기값
+    def set_initial(
+        self,
+        *,
+        x_value: float | None,
+        y_value: float | None,
+        y_side: str | None,
+        x_dt_min: QDateTime | None = None,
+        x_dt_max: QDateTime | None = None
+    ):
         if x_value is not None:
             if self.x_is_datetime:
                 q = QDateTime.fromMSecsSinceEpoch(int(x_value))
@@ -447,7 +1118,6 @@ class RefLineDialog(QDialog):
             else:
                 self.x_num.setValue(float(x_value))
 
-        # Y 초기값
         if y_value is not None:
             self.y_val.setValue(float(y_value))
 
@@ -464,8 +1134,63 @@ class RefLineDialog(QDialog):
             x_val = float(self.x_num.value())
 
         y_val = float(self.y_val.value())
-        side = self.y_axis_side.currentText().lower()  # "left"/"right"
+        side = self.y_axis_side.currentText().lower()
         return x_on, x_val, y_on, side, y_val
+
+
+class FilterableList(QWidget):
+    """
+    QListWidget + 검색창(QLineEdit)
+    - 타이핑 시 매칭 안되는 항목 숨김
+    - 선택 상태는 유지됨(숨겨져도 선택은 유지될 수 있음)
+    """
+    def __init__(self, items: list[str], *, placeholder: str = "Search...", parent=None):
+        super().__init__(parent)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(placeholder)
+        self.search.setClearButtonEnabled(True)
+
+        self.listw = QListWidget()
+        self.listw.setSelectionMode(QAbstractItemView.MultiSelection)
+
+        for t in items:
+            self.listw.addItem(QListWidgetItem(t))
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        lay.addWidget(self.search, 0)
+        lay.addWidget(self.listw, 1)
+
+        self.search.textChanged.connect(self._apply_filter)
+
+    def _apply_filter(self, text: str):
+        q = (text or "").strip().lower()
+        for i in range(self.listw.count()):
+            it = self.listw.item(i)
+            if not q:
+                it.setHidden(False)
+            else:
+                it.setHidden(q not in it.text().lower())
+
+    def set_selected(self, selected: list[str]):
+        sel = set(selected)
+        for i in range(self.listw.count()):
+            it = self.listw.item(i)
+            it.setSelected(it.text() in sel)
+
+    def selected_texts(self) -> list[str]:
+        return [i.text() for i in self.listw.selectedItems()]
+
+    def clear_selection(self):
+        self.listw.blockSignals(True)
+        try:
+            for i in range(self.listw.count()):
+                it = self.listw.item(i)
+                it.setSelected(False)
+        finally:
+            self.listw.blockSignals(False)
 
 
 class YColumnsDialog(QDialog):
@@ -478,7 +1203,7 @@ class YColumnsDialog(QDialog):
         self.fl.set_selected(selected)
 
         hint = QLabel("Type to search. You can choose columns you want to plot on the Y axis.")
-        hint.setStyleSheet("color: gray;")
+        hint.setStyleSheet("color:#6b7280;")
 
         self.btn_clear = QPushButton("Clear selection")
         self.btn_clear.setCursor(Qt.PointingHandCursor)
@@ -491,7 +1216,6 @@ class YColumnsDialog(QDialog):
         root = QVBoxLayout(self)
         root.addWidget(self.fl, 1)
         root.addWidget(hint)
-        root.addWidget(btns)
 
         row = QHBoxLayout()
         row.addWidget(self.btn_clear, 0)
@@ -511,15 +1235,15 @@ class TitleBar(QWidget):
         super().__init__(parent)
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 6, 8, 4)
+        lay.setContentsMargins(12, 8, 12, 6)
         lay.setSpacing(8)
 
         self.lbl = QLabel("—")
-        self.lbl.setStyleSheet("font-weight:700;")
+        self.lbl.setStyleSheet("font-weight:700; font-size:13px; color:#111827;")
         self.lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
 
         hint = QLabel("X: click=range / drag=zoom · Y band=scale")
-        hint.setStyleSheet("color: rgba(0,0,0,0.35); font-size: 11px;")
+        hint.setStyleSheet("color:#9ca3af; font-size:11px;")
         hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         lay.addWidget(self.lbl, 1)
@@ -547,7 +1271,6 @@ class PowerChartView(QChartView):
 
         logger.debug("[UI][PowerChartView] init")
 
-        # hover bands
         self._band_bottom = QGraphicsRectItem()
         self._band_left = QGraphicsRectItem()
         self._band_right = QGraphicsRectItem()
@@ -557,7 +1280,6 @@ class PowerChartView(QChartView):
             it.setBrush(QColor(0, 0, 0, 0))
             it.setVisible(False)
 
-        # crosshair lines
         self._vline = QGraphicsLineItem()
         self._hline = QGraphicsLineItem()
         for ln in (self._vline, self._hline):
@@ -565,7 +1287,6 @@ class PowerChartView(QChartView):
             ln.setPen(QPen(QColor("gray"), 1))
             ln.setVisible(False)
 
-        # reference lines (red dashed)
         self._ref_vline = QGraphicsLineItem()
         self._ref_hline = QGraphicsLineItem()
         ref_pen = QPen(QColor("red"), 1.3, Qt.DashLine)
@@ -574,35 +1295,33 @@ class PowerChartView(QChartView):
             ln.setPen(ref_pen)
             ln.setVisible(False)
 
-        # alarm halo (scene item)
         self._alarm_halo = QGraphicsEllipseItem()
         self._alarm_halo.setZValue(11)
         self._alarm_halo.setPen(QPen(QColor(255, 0, 0, 0), 0))
         self._alarm_halo.setBrush(QBrush(QColor(255, 0, 0, 60)))
         self._alarm_halo.setVisible(False)
 
-        # rubber band zoom
         self._rubber = QRubberBand(QRubberBand.Rectangle, self)
         self._dragging = False
         self._drag_start = QPoint()
         self._hover_kind: str | None = None
 
-        # ✅ custom tips
         self.tip_cross = StickyTip(self, kind="cross")
         self.tip_alarm = StickyTip(self, kind="alarm")
 
     def minimumSizeHint(self) -> QSize:
-        # ✅ 핵심: QChartView 기본값(큰 값)을 무시
         return QSize(0, 0)
 
     def sizeHint(self) -> QSize:
-        return QSize(200, 120)  # 너무 0이면 UX가 이상할 수 있어 적당히
+        return QSize(200, 120)
 
     def _ensure_scene_items(self):
         sc = self.chart().scene()
-        for it in (self._band_bottom, self._band_left, self._band_right,
-                   self._vline, self._hline, self._alarm_halo,
-                   self._ref_vline, self._ref_hline):
+        for it in (
+            self._band_bottom, self._band_left, self._band_right,
+            self._vline, self._hline, self._alarm_halo,
+            self._ref_vline, self._ref_hline
+        ):
             if it.scene() is None:
                 sc.addItem(it)
 
@@ -610,18 +1329,15 @@ class PowerChartView(QChartView):
         super().resizeEvent(e)
         self._ensure_scene_items()
         self._layout_bands()
-        self.area.update_reference_lines()  # ✅ 추가
+        self.area.update_reference_lines()
 
     def mouseDoubleClickEvent(self, e):
-        # plot 영역에서만 동작
         if not self._plot_contains(e.position().toPoint()):
             return super().mouseDoubleClickEvent(e)
 
-        # 클릭 위치를 기준으로 초기값 계산
         pa = self.chart().plotArea()
         p_scene = self.mapToScene(e.position().toPoint())
 
-        # X 값
         x_val = None
         ref = self.area._ref_series_for_mapping()
         if ref is not None:
@@ -631,7 +1347,6 @@ class PowerChartView(QChartView):
             except Exception:
                 x_val = None
 
-        # Y 값 (기본은 left 기준으로)
         y_val = None
         y_side = "left"
         ref_y = self.area._ref_series_for_left()
@@ -644,14 +1359,20 @@ class PowerChartView(QChartView):
 
         x_is_dt = (self.area.parent_panel.x_is_datetime and (not self.area.compare_active))
         dlg = RefLineDialog(x_is_datetime=x_is_dt, parent=self)
-        # datetime이면 full range(min/max)도 같이 주면 편함
+
         x_dt_min = None
         x_dt_max = None
-        if x_is_dt:  # ✅ dlg에 맞춰서
+        if x_is_dt:
             x_dt_min = self.area.parent_panel._full_x_min_dt
             x_dt_max = self.area.parent_panel._full_x_max_dt
 
-        dlg.set_initial(x_value=x_val, y_value=y_val, y_side=y_side, x_dt_min=x_dt_min, x_dt_max=x_dt_max)
+        dlg.set_initial(
+            x_value=x_val,
+            y_value=y_val,
+            y_side=y_side,
+            x_dt_min=x_dt_min,
+            x_dt_max=x_dt_max
+        )
 
         if dlg.exec() != QDialog.Accepted:
             return
@@ -660,13 +1381,10 @@ class PowerChartView(QChartView):
 
         self.area.ref_x_on = bool(x_on)
         self.area.ref_x_value = float(x_value)
-
         self.area.ref_y_on = bool(y_on)
         self.area.ref_y_side = str(side)
         self.area.ref_y_value = float(y_value)
-
         self.area.update_reference_lines()
-        return
 
     def _layout_bands(self):
         pa: QRectF = self.chart().plotArea()
@@ -758,10 +1476,8 @@ class PowerChartView(QChartView):
 
         self._update_crosshair(e.position().toPoint())
 
-        # ✅ crosshair tip: plot 위 + 알람 hovering 아닐 때만 표시
         if self._plot_contains(e.position().toPoint()):
             self.tip_cross.set_target_hovering(True)
-
             if self.area._alarm_hovering:
                 self.tip_cross.hide_tip()
             else:
@@ -793,11 +1509,9 @@ class PowerChartView(QChartView):
             self.area.parent_panel._open_x_range_dialog()
             return
         if kind == "y_left":
-            # self.area.parent_panel._open_y_scale_dialog(side="left")
             self.area.parent_panel._open_y_scale_dialog(side="left", area=self.area)
             return
         if kind == "y_right":
-            # self.area.parent_panel._open_y_scale_dialog(side="right")
             self.area.parent_panel._open_y_scale_dialog(side="right", area=self.area)
             return
 
@@ -854,6 +1568,8 @@ class PlotArea:
         self.chart.legend().setVisible(True)
         self.chart.setBackgroundRoundness(10)
         self.chart.setMargins(QMargins(0, 0, 0, 0))
+        self.chart.setBackgroundVisible(False)
+        self.chart.setPlotAreaBackgroundVisible(False)
 
         try:
             self.chart.layout().setContentsMargins(0, 0, 0, 0)
@@ -862,48 +1578,104 @@ class PlotArea:
 
         self.view = PowerChartView(self)
         self.view.setChart(self.chart)
+        self.view.setStyleSheet("background: transparent; border: none;")
 
-        # container
+        self.container = QWidget()
+        self.container.setObjectName("plotShadowWrap")
+        self.container.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.container.setMinimumSize(0, 0)
+        self.container.setStyleSheet("""
+        QWidget#plotShadowWrap {
+            background: transparent;
+            border: none;
+        }
+        """)
+
         self.widget = QWidget()
+        self.widget.setObjectName("plotCard")
         self.widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.widget.setMinimumSize(0, 0)
+        self.widget.setStyleSheet("""
+        QWidget#plotCard {
+            background: white;
+            border: 1px solid #dde3ec;
+            border-radius: 18px;
+        }
+        """)
+
+        apply_shadow(self.widget, blur=28, y_offset=5)
+
+        container_lay = QVBoxLayout(self.container)
+        container_lay.setContentsMargins(14, 14, 14, 14)  # <- shadow 여유 공간
+        container_lay.setSpacing(0)
+        container_lay.addWidget(self.widget)
 
         wlay = QVBoxLayout(self.widget)
         wlay.setContentsMargins(0, 0, 0, 0)
         wlay.setSpacing(0)
 
         topbar = QHBoxLayout()
-        topbar.setContentsMargins(4, 4, 4, 0)
-        topbar.setSpacing(6)
+        topbar.setContentsMargins(10, 8, 10, 6)
+        topbar.setSpacing(8)
 
         self.btn_delete = QPushButton("✕")
         self.btn_delete.setToolTip("Delete this graph")
-        self.btn_delete.setFixedSize(24, 22)
+        self.btn_delete.setFixedSize(30, 30)
+        self.btn_delete.setCursor(Qt.PointingHandCursor)
         self.btn_delete.setStyleSheet(
-            "QPushButton{border:1px solid rgba(0,0,0,0.2); border-radius:6px; background:rgba(255,255,255,0.85);}"
-            "QPushButton:hover{background:rgba(255,255,255,1.0);}"
-            "QPushButton:pressed{background:rgba(230,230,230,1.0);}"
+            "QPushButton{"
+            "background:white;"
+            "border:1px solid #d9dee7;"
+            "border-radius:10px;"
+            "font-weight:700;"
+            "color:#374151;"
+            "}"
+            "QPushButton:hover{background:#f8fafc;}"
+            "QPushButton:pressed{background:#eef2f7;}"
         )
         self.btn_delete.clicked.connect(lambda: self.parent_panel.delete_graph(self))
 
-        self.btn_menu = QPushButton("···")
+        self.btn_menu = QPushButton("⋯")
         self.btn_menu.setToolTip("Graph menu")
-        self.btn_menu.setFixedSize(24, 22)
+        self.btn_menu.setFixedSize(30, 30)
         self.btn_menu.setCursor(Qt.PointingHandCursor)
         self.btn_menu.setStyleSheet(
             "QPushButton{"
-            "border:1px solid rgba(0,0,0,0.2);"
-            "border-radius:6px;"
-            "background:rgba(255,255,255,0.85);"
-            "font-size:16px;"
-            "font-weight:bold;"
+            "background:white;"
+            "border:1px solid #d9dee7;"
+            "border-radius:10px;"
+            "font-size:18px;"
+            "font-weight:700;"
+            "color:#111827;"
+            "padding-bottom:2px;"
             "}"
-            "QPushButton:hover{background:rgba(255,255,255,1.0);}"
-            "QPushButton:pressed{background:rgba(230,230,230,1.0);}"
+            "QPushButton:hover{background:#f8fafc;}"
+            "QPushButton:pressed{background:#eef2f7;}"
             "QPushButton::menu-indicator{image:none;width:0px;}"
         )
 
         self.menu = QMenu(self.btn_menu)
+        self.menu.setStyleSheet("""
+        QMenu {
+            background: white;
+            border: 1px solid #d9dee7;
+            border-radius: 2px;
+            padding: 6px;
+        }
+        QMenu::item {
+            padding: 8px 14px;
+            border-radius: 8px;
+            color: #111827;
+        }
+        QMenu::item:selected {
+            background: #eef4ff;
+        }
+        QMenu::separator {
+            height: 1px;
+            background: #e5e7eb;
+            margin: 6px 8px;
+        }
+        """)
 
         self.act_left_cols = QAction("Main Y components", self.menu)
         self.act_right_cols = QAction("Sub Y components", self.menu)
@@ -946,22 +1718,20 @@ class PlotArea:
         self.left_series: list[QLineSeries] = []
         self.right_series: list[QLineSeries] = []
 
-        # alarm
         self._alarm_hovering: bool = False
         self.alarm_series: QScatterSeries | None = None
-        self._alarm_map: dict[int, list[tuple[str, str, str, str]]] = {}  # ms -> (timeStr, text, stepNo, stepName)
+        self._alarm_map: dict[int, list[tuple[str, str, str, str]]] = {}
 
         self.compare_active: bool = False
         self.compare_full_xmin: float | None = None
         self.compare_full_xmax: float | None = None
         self.compare_x_mode: str = ""
 
-        # reference line state
         self.ref_x_on: bool = False
         self.ref_y_on: bool = False
-        self.ref_x_value: float = 0.0      # x axis value (ms if datetime / numeric if not)
-        self.ref_y_value: float = 0.0      # y axis value
-        self.ref_y_side: str = "left"      # "left" or "right"
+        self.ref_x_value: float = 0.0
+        self.ref_y_value: float = 0.0
+        self.ref_y_side: str = "left"
 
     def _ref_series_for_left(self):
         if self.left_series:
@@ -982,13 +1752,11 @@ class PlotArea:
         return None
 
     def update_reference_lines(self):
-        """현재 ref_x/ref_y 설정값을 기준으로 붉은 점선 위치 업데이트."""
         v = self.view
         v._ensure_scene_items()
 
         pa = self.chart.plotArea()
 
-        # X ref (vertical)
         if self.ref_x_on:
             ref_series = self._ref_series_for_mapping()
             if ref_series is not None:
@@ -1005,15 +1773,10 @@ class PlotArea:
         else:
             v._ref_vline.setVisible(False)
 
-        # Y ref (horizontal)
         if self.ref_y_on:
-            # 어느 축(Left/Right) 기준인지 선택
             ref_series_y = self._ref_series_for_left() if self.ref_y_side == "left" else self._ref_series_for_right()
             if ref_series_y is not None:
                 try:
-                    # y만 고정해서 mapToPosition 계산: x는 plot 중심값을 쓰면 안정적
-                    # (주의: mapToPosition은 series의 축에 의해 결정됨)
-                    # 일단 series 기반으로 y 맵핑을 얻어오고, x는 plot 범위 전체로 라인을 긋는다.
                     pos = self.chart.mapToPosition(QPointF(0.0, float(self.ref_y_value)), ref_series_y)
                     y_scene = pos.y()
                     y_scene = max(pa.top(), min(pa.bottom(), y_scene))
@@ -1055,18 +1818,14 @@ class PlotArea:
 
         lines: list[str] = []
 
-        # ✅ 핵심: Compare 모드는 datetime 해석 금지. Δt/Index로 표시.
         if self.compare_active:
             xm = (self.compare_x_mode or "").lower()
             if "elapsed" in xm or "Δt" in self.compare_x_mode:
-                # x는 seconds
                 lines.append(f"Elapsed : {int(x)} s")
             else:
-                # x는 index (float로 들어올 수 있으니 반올림/정수화)
                 idx = int(round(x))
                 lines.append(f"Index : {idx}")
         else:
-            # ----- 기존 normal mode 로직 -----
             if self.parent_panel.x_is_datetime:
                 qdt = QDateTime.fromMSecsSinceEpoch(int(x))
                 lines.append(qdt.toString("yyyy-MM-dd HH:mm:ss"))
@@ -1082,7 +1841,6 @@ class PlotArea:
             else:
                 lines.append(f"X = {x:.6g}")
 
-        # ----- 아래 Left/Right Y 값 표시는 그대로 재사용 -----
         if self.left_series:
             lines.append("")
             lines.append("[Left]")
@@ -1178,8 +1936,7 @@ class PlotArea:
         if not infos:
             return ""
 
-        # 같은 ms에 여러 알람이 있으면 전부 출력
-        time_str = infos[0][0]  # 동일 시간대라고 가정(키가 ms라서)
+        time_str = infos[0][0]
         step_no = infos[0][2] or ""
         step_name = infos[0][3] or ""
 
@@ -1192,7 +1949,6 @@ class PlotArea:
             else:
                 lines.append(f"Step: {step_name}")
 
-        # 알람 목록
         if len(infos) > 1:
             lines.append(f"Alarms: {len(infos)}")
         for i, (_, txt, _, _) in enumerate(infos, start=1):
@@ -1209,7 +1965,6 @@ class PlotArea:
             return
 
         self._alarm_hovering = bool(state)
-
         self.view.show_alarm_halo_at(self.alarm_series, point, state)
 
         if state:
@@ -1238,8 +1993,6 @@ class HistoryChartView(QChartView):
         super().__init__(chart, parent)
         self.setRenderHint(QPainter.Antialiasing, True)
         self.setMouseTracking(True)
-
-        # ✅ 기존 StickyTip 재사용 (cross 스타일로 써도 되고, 필요하면 kind="alarm"로)
         self.tip = StickyTip(self, kind="cross")
 
     def hide_tip(self):
@@ -1260,7 +2013,7 @@ class HistoryDialog(QDialog):
     def __init__(self, df_logs: pd.DataFrame, parent=None):
         super().__init__(parent)
 
-        self.setWindowFlag(Qt.Window, True)  # "대화상자"가 아니라 일반 윈도우 취급
+        self.setWindowFlag(Qt.Window, True)
         self.setWindowFlag(Qt.WindowMinMaxButtonsHint, True)
         self.setWindowFlag(Qt.WindowCloseButtonHint, True)
 
@@ -1269,14 +2022,14 @@ class HistoryDialog(QDialog):
 
         self.df_logs = df_logs.copy()
 
-        self.mode = QComboBox()
+        self.mode = MenuSelectButton("Mode")
         self.mode.addItems(["Total", "By Tube", "By Recipe"])
-        self.mode.currentIndexChanged.connect(self._rebuild_chart)
+        self.mode.setCurrentText("Total")
+        self.mode.selectionChanged.connect(lambda _: self._rebuild_chart())
 
         self.btn_export = QPushButton("Export raw data (Excel)")
         self.btn_export.setCursor(Qt.PointingHandCursor)
 
-        # ✅ 기간 선택 (날짜 단위)
         self.date_from = QDateEdit()
         self.date_from.setCalendarPopup(True)
         self.date_from.setDisplayFormat("yyyy-MM-dd")
@@ -1285,7 +2038,10 @@ class HistoryDialog(QDialog):
         self.date_to.setCalendarPopup(True)
         self.date_to.setDisplayFormat("yyyy-MM-dd")
 
-        # df_logs 기반으로 기본값 세팅
+        self.btn_date_range = QPushButton("Select date range")
+        self.btn_date_range.setCursor(Qt.PointingHandCursor)
+        self.btn_date_range.clicked.connect(self._open_date_range_dialog)
+
         if not self.df_logs.empty and "date_dt" in self.df_logs.columns:
             dmin = pd.to_datetime(self.df_logs["date_dt"].min()).date()
             dmax = pd.to_datetime(self.df_logs["date_dt"].max()).date()
@@ -1296,26 +2052,29 @@ class HistoryDialog(QDialog):
             self.date_from.setDate(today.addMonths(-1))
             self.date_to.setDate(today)
 
-        # 값 바뀌면 그래프 갱신
-        self.date_from.dateChanged.connect(self._rebuild_chart)
-        self.date_to.dateChanged.connect(self._rebuild_chart)
+        # self.date_from.dateChanged.connect(self._rebuild_chart)
+        # self.date_to.dateChanged.connect(self._rebuild_chart)
+
+        apply_chrome_input_styles(self)
 
         top = QHBoxLayout()
         top.addWidget(QLabel("Color/group by:"), 0)
         top.addWidget(self.mode, 0)
         top.addSpacing(12)
-        top.addWidget(QLabel("From"), 0)
-        top.addWidget(self.date_from, 0)
-        top.addWidget(QLabel("To"), 0)
-        top.addWidget(self.date_to, 0)
+        top.addWidget(QLabel("Period"), 0)
+        top.addWidget(self.btn_date_range, 0)
         top.addStretch(1)
         top.addWidget(self.btn_export, 0)
 
         self.chart = QChart()
         self.chart.legend().setVisible(True)
         self.chart.legend().setAlignment(Qt.AlignBottom)
+        self.chart.setBackgroundVisible(False)
+        self.chart.setPlotAreaBackgroundVisible(False)
 
         self.view = HistoryChartView(self.chart)
+        self.view.setStyleSheet("background:white; border:1px solid #dde3ec; border-radius:16px;")
+        apply_shadow(self.view, blur=24, y_offset=4)
 
         lay = QVBoxLayout(self)
         lay.addLayout(top)
@@ -1325,13 +2084,34 @@ class HistoryDialog(QDialog):
         self._axis_x: QBarCategoryAxis | None = None
         self._axis_y: QValueAxis | None = None
 
+        self._refresh_date_range_button()
+        self._rebuild_chart()
+
+    def _refresh_date_range_button(self):
+        s = self.date_from.date().toString("yyyy-MM-dd")
+        e = self.date_to.date().toString("yyyy-MM-dd")
+        self.btn_date_range.setText(f"{s}  ~  {e}")
+
+    def _open_date_range_dialog(self):
+        dlg = DateRangeDialog(self)
+        dlg.set_values(self.date_from.date(), self.date_to.date())
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        d0, d1 = dlg.values()
+        if d0 > d1:
+            d0, d1 = d1, d0
+
+        self.date_from.setDate(d0)
+        self.date_to.setDate(d1)
+        self._refresh_date_range_button()
         self._rebuild_chart()
 
     def _selected_date_range(self) -> tuple[pd.Timestamp, pd.Timestamp]:
         d0 = self.date_from.date()
         d1 = self.date_to.date()
 
-        # 뒤집혔으면 swap
         if d0 > d1:
             d0, d1 = d1, d0
 
@@ -1345,13 +2125,10 @@ class HistoryDialog(QDialog):
 
         start, end = self._selected_date_range()
         df = self.df_logs.copy()
-
-        # date_dt는 날짜(00:00)로 들어있으니 inclusive로 between 가능
         df = df[df["date_dt"].between(start, end, inclusive="both")].copy()
         return df
 
     def _unique_colors(self):
-        # 기존과 동일 팔레트
         base = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
                 "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
         i = 0
@@ -1365,12 +2142,6 @@ class HistoryDialog(QDialog):
             i += 1
 
     def _make_pivot(self) -> tuple[list[str], list[str], dict[str, list[int]]]:
-        """
-        return:
-          dates: ["2026-02-01", ...]
-          groups: ["TUBE01", ...] or ["Total"]
-          data: {group: [count_per_date...]}
-        """
         if self.df_logs.empty:
             return [], [], {}
 
@@ -1395,17 +2166,15 @@ class HistoryDialog(QDialog):
 
         pivot = (
             df.pivot_table(index="date_label", columns=gcol, values="path", aggfunc="count", fill_value=0)
-            .sort_index()
+              .sort_index()
         )
         dates = pivot.index.tolist()
         groups = list(pivot.columns.astype(str))
-
         data = {g: pivot[g].astype(int).tolist() for g in groups}
         return dates, groups, data
 
     def _rebuild_chart(self):
         self.chart.removeAllSeries()
-        # 축 제거(있으면)
         for ax in list(self.chart.axes()):
             try:
                 self.chart.removeAxis(ax)
@@ -1419,12 +2188,11 @@ class HistoryDialog(QDialog):
 
         mode = self.mode.currentText()
         if mode in ("By Tube", "By Recipe"):
-            series = QStackedBarSeries()  # ✅ 막대 1개 안에 여러 색(세로 누적)
+            series = QStackedBarSeries()
         else:
-            series = QBarSeries()  # Total은 단일
+            series = QBarSeries()
         colors = self._unique_colors()
 
-        # QBarSet per group
         for g in groups:
             bs = QBarSet(str(g))
             c = QColor(next(colors))
@@ -1432,7 +2200,6 @@ class HistoryDialog(QDialog):
             bs.setColor(c)
             bs.append([int(v) for v in data[g]])
 
-            # ✅ StickyTip hover
             def make_hover_handler(barset: QBarSet):
                 def _on_hovered(status: bool, index: int):
                     if not status:
@@ -1446,11 +2213,9 @@ class HistoryDialog(QDialog):
                     v = float(barset.at(index))
                     cnt = int(v)
 
-                    # ✅ stacked면 세그먼트의 중간 y를 계산
                     y_mid = v
                     if isinstance(series, QStackedBarSeries):
                         below = 0.0
-                        # series의 barSets 순서대로 누적되므로, 현재 barset 이전 것들의 합을 구함
                         for bs2 in series.barSets():
                             if bs2 is barset:
                                 break
@@ -1481,9 +2246,7 @@ class HistoryDialog(QDialog):
         axis_y.setTickCount(6)
         axis_y.setMin(0)
 
-        # ✅ y max 계산
         if isinstance(series, QStackedBarSeries) and groups:
-            # 날짜 index별로 sum을 구해서 그 최대값을 축 max로
             totals = [0] * len(dates)
             for g in groups:
                 vals = data.get(g, [])
@@ -1492,7 +2255,6 @@ class HistoryDialog(QDialog):
                         totals[i] += int(v)
             maxv = max(totals) if totals else 0
         else:
-            # Total(또는 non-stacked)일 때는 기존대로 “단일 값 최대”
             maxv = 0
             for g in groups:
                 vals = data.get(g, [])
@@ -1511,7 +2273,6 @@ class HistoryDialog(QDialog):
         self._axis_x = axis_x
         self._axis_y = axis_y
 
-        mode = self.mode.currentText()
         self.chart.setTitle(f"Runs per day ({mode})")
 
 
@@ -1520,17 +2281,17 @@ class CompareDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Compare Settings")
 
-        self.x_mode = QComboBox()
+        self.x_mode = MenuSelectButton("X axis")
         self.x_mode.addItems(["Elapsed seconds (Δt)", "Index"])
+        self.x_mode.setCurrentText("Elapsed seconds (Δt)")
 
         self.step_no_edit = QLineEdit()
         self.step_no_edit.setPlaceholderText("e.g. 12 (blank = all steps)")
 
-        # ✅ 검색 가능한 Y 선택 리스트로 교체
         self.y_pick = FilterableList(common_cols, placeholder="Search compare Y columns...", parent=self)
 
         hint = QLabel("Select up to 3 Y columns to compare.")
-        hint.setStyleSheet("color: gray;")
+        hint.setStyleSheet("color:#6b7280;")
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self._on_accept)
@@ -1546,6 +2307,8 @@ class CompareDialog(QDialog):
         lay.addWidget(hint)
         lay.addWidget(btns)
 
+        apply_chrome_input_styles(self)
+
     def _on_accept(self):
         if not self.y_pick.selected_texts():
             QMessageBox.information(self, "Compare", "비교할 Y 컬럼을 최소 1개 선택해줘.")
@@ -1553,25 +2316,60 @@ class CompareDialog(QDialog):
         self.accept()
 
     def values(self):
-        cols = self.y_pick.selected_texts()
-        cols = cols[:3]
-
+        cols = self.y_pick.selected_texts()[:3]
         step_txt = (self.step_no_edit.text() or "").strip()
-        return (self.x_mode.currentText(), cols, step_txt)
+        return self.x_mode.currentText(), cols, step_txt
+
+
+class TreeFilterProxyModel(QSortFilterProxyModel):
+    """
+    QFileSystemModel용 트리 검색/필터
+    - 파일명/경로 기준으로 필터
+    - 디렉터리는 하위에 매칭 항목이 있으면 표시
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._filter_text = ""
+
+    def setFilterText(self, text: str):
+        self._filter_text = (text or "").strip().lower()
+        self.invalidate()
+
+    def filterAcceptsRow(self, source_row, source_parent):
+        if not self._filter_text:
+            return True
+
+        model = self.sourceModel()
+        idx = model.index(source_row, 0, source_parent)
+        if not idx.isValid():
+            return False
+
+        name = str(model.fileName(idx)).lower()
+        path = str(model.filePath(idx)).lower()
+
+        if self._filter_text in name or self._filter_text in path:
+            return True
+
+        if model.isDir(idx):
+            for i in range(model.rowCount(idx)):
+                if self.filterAcceptsRow(i, idx):
+                    return True
+
+        return False
 
 
 # =========================================================
 # Main Panel
 # =========================================================
 class CsvPlotPanel(QWidget):
-    compareRequested = Signal(object)  # object = PlotArea
-    historyRequested = Signal(object)  # ✅ 추가
-    exportRequested = Signal(object)   # ✅ 추가
+    compareRequested = Signal(object)
+    historyRequested = Signal(object)
+    exportRequested = Signal(object)
 
     def __init__(self, alarm_dir: Path, parent=None):
         super().__init__(parent)
 
-        self.root_dir: Path | None = None  # ✅ MainWindow에서 주입
+        self.root_dir: Path | None = None
         self._history_df_cache: pd.DataFrame | None = None
         self._history_cache_root: Path | None = None
 
@@ -1589,9 +2387,7 @@ class CsvPlotPanel(QWidget):
         self._areas: list[PlotArea] = []
         self._last_cols: int | None = None
 
-        # ✅ 줌 최소 범위 (datetime: ms, numeric: units)
         self._min_zoom_span: float = 0.0
-        # ✅ 전체 X 범위 저장 (Reset Zoom 용)
         self._full_x_min_dt: QDateTime | None = None
         self._full_x_max_dt: QDateTime | None = None
         self._full_x_min_num: float | None = None
@@ -1599,7 +2395,6 @@ class CsvPlotPanel(QWidget):
 
         self._mode: str = "single"
 
-        # ✅ Compare mode zoom 상태
         self._compare_active: bool = False
         self._compare_full_xmin: float | None = None
         self._compare_full_xmax: float | None = None
@@ -1608,40 +2403,74 @@ class CsvPlotPanel(QWidget):
 
     def _build_ui(self):
         root = QVBoxLayout(self)
+        root.setContentsMargins(0, 10, 10, 0)
+        root.setSpacing(0)
+
+        toolbar_btn_css = (
+            "QPushButton{"
+            "background:white;"
+            "border:1px solid #d9dee7;"
+            "border-radius:10px;"
+            "padding:8px 14px;"
+            "font-weight:600;"
+            "}"
+            "QPushButton:hover{background:#f8fafc;}"
+            "QPushButton:pressed{background:#eef2f7;}"
+            "QPushButton:disabled{background:#f3f4f6; color:#9ca3af; border:1px solid #e5e7eb;}"
+        )
+        accent_btn_css = (
+            "QPushButton{"
+            "background:#0f6cbd;"
+            "color:white;"
+            "border:1px solid #0f6cbd;"
+            "border-radius:10px;"
+            "padding:8px 14px;"
+            "font-weight:700;"
+            "}"
+            "QPushButton:hover{background:#115ea3;}"
+            "QPushButton:pressed{background:#0f548c;}"
+            "QPushButton:disabled{background:#9ca3af; border:1px solid #9ca3af; color:white;}"
+        )
 
         title_row = QHBoxLayout()
+        title_row.setContentsMargins(10, 2, 2, 6)
+        title_row.setSpacing(8)
+
         self.title = QLabel("Choose CSV File to Plot")
-        self.title.setStyleSheet("font-weight: 700;")
+        self.title.setStyleSheet("font-weight:700; font-size:14px; color:#111827;")
         title_row.addWidget(self.title, 1)
 
         self.btn_compare = QPushButton("Compare various logs")
         self.btn_compare.setEnabled(True)
-        self.btn_compare.setVisible(False)  # ✅ 안 보이게
-        # self.btn_compare.clicked.connect(self.compare_selected_files)
+        self.btn_compare.setVisible(False)
         title_row.addWidget(self.btn_compare, 0)
 
         self.btn_history = QPushButton("History")
         self.btn_history.setEnabled(True)
         self.btn_history.setToolTip("Show runs per day (by date)")
         self.btn_history.clicked.connect(self.show_history_dialog)
+        self.btn_history.setStyleSheet(toolbar_btn_css)
+        apply_shadow(self.btn_history, blur=18, y_offset=3)
         title_row.addWidget(self.btn_history, 0)
 
-        # ✅ Reset Zoom 버튼 추가
         self.btn_reset_zoom = QPushButton("Reset Zoom")
         self.btn_reset_zoom.setEnabled(False)
         self.btn_reset_zoom.setToolTip("Reset Zoom (X Axis) to full scale")
         self.btn_reset_zoom.clicked.connect(self.reset_zoom)
+        self.btn_reset_zoom.setStyleSheet(toolbar_btn_css)
+        apply_shadow(self.btn_reset_zoom, blur=18, y_offset=3)
         title_row.addWidget(self.btn_reset_zoom, 0)
 
         self.btn_add_graph = QPushButton("+ Graph")
         self.btn_add_graph.setEnabled(False)
         self.btn_add_graph.setToolTip("Add one more graph")
         self.btn_add_graph.clicked.connect(self.add_graph)
+        self.btn_add_graph.setStyleSheet(accent_btn_css)
+        apply_shadow(self.btn_add_graph, blur=20, y_offset=4)
         title_row.addWidget(self.btn_add_graph, 0)
 
         root.addLayout(title_row)
 
-        # hidden controls
         self.ctrl_widget = QWidget()
         ctrl_layout = QVBoxLayout(self.ctrl_widget)
         ctrl_layout.setContentsMargins(0, 0, 0, 0)
@@ -1649,15 +2478,17 @@ class CsvPlotPanel(QWidget):
 
         top = QHBoxLayout()
         top.addWidget(QLabel("Y(Left):"))
-        self.y_combos = [QComboBox(), QComboBox(), QComboBox()]
+        self.y_combos = [MenuSelectButton("Select Y"), MenuSelectButton("Select Y"), MenuSelectButton("Select Y")]
         for cb in self.y_combos:
             cb.setEnabled(False)
             cb.setMinimumWidth(160)
             top.addWidget(cb, 1)
+
         self.btn_clear_left = QPushButton("Clear L")
         self.btn_clear_left.setEnabled(False)
         self.btn_clear_left.clicked.connect(self.clear_left)
         top.addWidget(self.btn_clear_left)
+
         self.plot_btn = QPushButton("Plot")
         self.plot_btn.setEnabled(False)
         self.plot_btn.clicked.connect(self.plot)
@@ -1666,18 +2497,18 @@ class CsvPlotPanel(QWidget):
 
         top2 = QHBoxLayout()
         top2.addWidget(QLabel("Y2(Right):"))
-        self.y2_combos = [QComboBox(), QComboBox(), QComboBox()]
+        self.y2_combos = [MenuSelectButton("Select Y2"), MenuSelectButton("Select Y2"), MenuSelectButton("Select Y2")]
         for cb in self.y2_combos:
             cb.setEnabled(False)
             cb.setMinimumWidth(160)
             top2.addWidget(cb, 1)
+
         self.btn_clear_right = QPushButton("Clear R")
         self.btn_clear_right.setEnabled(False)
         self.btn_clear_right.clicked.connect(self.clear_right)
         top2.addWidget(self.btn_clear_right)
         ctrl_layout.addLayout(top2)
 
-        # X range
         range_row = QHBoxLayout()
         range_row.addWidget(QLabel("X range:"), 0)
         self.range_stack = QStackedWidget()
@@ -1685,58 +2516,70 @@ class CsvPlotPanel(QWidget):
         self.dt_widget = QWidget()
         dt_layout = QHBoxLayout(self.dt_widget)
         dt_layout.setContentsMargins(0, 0, 0, 0)
+
         self.dt_start = QDateTimeEdit()
         self.dt_start.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.dt_start.setCalendarPopup(True)
+
         self.dt_end = QDateTimeEdit()
         self.dt_end.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.dt_end.setCalendarPopup(True)
-        dt_layout.addWidget(QLabel("Start"))
-        dt_layout.addWidget(self.dt_start, 1)
-        dt_layout.addWidget(QLabel("End"))
-        dt_layout.addWidget(self.dt_end, 1)
+
+        self.btn_dt_range = QPushButton("Select datetime range")
+        self.btn_dt_range.setCursor(Qt.PointingHandCursor)
+        self.btn_dt_range.clicked.connect(self._open_x_range_dialog)
+
+        dt_layout.addWidget(self.btn_dt_range, 1)
 
         self.num_widget = QWidget()
         num_layout = QHBoxLayout(self.num_widget)
         num_layout.setContentsMargins(0, 0, 0, 0)
+
         self.num_start = QDoubleSpinBox()
         self.num_start.setDecimals(6)
         self.num_start.setRange(-1e30, 1e30)
+
         self.num_end = QDoubleSpinBox()
         self.num_end.setDecimals(6)
         self.num_end.setRange(-1e30, 1e30)
-        num_layout.addWidget(QLabel("Start"))
-        num_layout.addWidget(self.num_start, 1)
-        num_layout.addWidget(QLabel("End"))
-        num_layout.addWidget(self.num_end, 1)
+
+        self.btn_num_range = QPushButton("Select numeric range")
+        self.btn_num_range.setCursor(Qt.PointingHandCursor)
+        self.btn_num_range.clicked.connect(self._open_x_range_dialog)
+
+        num_layout.addWidget(self.btn_num_range, 1)
 
         self.range_stack.addWidget(self.dt_widget)
         self.range_stack.addWidget(self.num_widget)
         range_row.addWidget(self.range_stack, 1)
         ctrl_layout.addLayout(range_row)
 
-        # Y scale
         yscale_row = QHBoxLayout()
         yscale_row.addWidget(QLabel("Left Y Scale:"), 0)
-        self.left_scale_mode = QComboBox()
+        self.left_scale_mode = MenuSelectButton("Left mode")
         self.left_scale_mode.addItems(["Auto", "Manual"])
+        self.left_scale_mode.setCurrentText("Auto")
         self.left_scale_mode.setEnabled(False)
         yscale_row.addWidget(self.left_scale_mode, 0)
+
         self.left_ymin = QDoubleSpinBox()
         self.left_ymin.setDecimals(6)
         self.left_ymin.setRange(-1e30, 1e30)
         self.left_ymin.setEnabled(False)
         yscale_row.addWidget(QLabel("Min"))
         yscale_row.addWidget(self.left_ymin, 1)
+
         self.left_ymax = QDoubleSpinBox()
         self.left_ymax.setDecimals(6)
         self.left_ymax.setRange(-1e30, 1e30)
         self.left_ymax.setEnabled(False)
         yscale_row.addWidget(QLabel("Max"))
         yscale_row.addWidget(self.left_ymax, 1)
-        self.left_log = QCheckBox("Log")  # UI만
+
+        self.left_log = QCheckBox("Log")
         self.left_log.setEnabled(False)
         yscale_row.addWidget(self.left_log, 0)
+
         self.btn_reset_left_scale = QPushButton("Reset L")
         self.btn_reset_left_scale.setEnabled(False)
         self.btn_reset_left_scale.clicked.connect(self.reset_left_scale)
@@ -1745,48 +2588,54 @@ class CsvPlotPanel(QWidget):
 
         y2scale_row = QHBoxLayout()
         y2scale_row.addWidget(QLabel("Right Y2 Scale:"), 0)
-        self.right_scale_mode = QComboBox()
+        self.right_scale_mode = MenuSelectButton("Right mode")
         self.right_scale_mode.addItems(["Auto", "Manual"])
+        self.right_scale_mode.setCurrentText("Auto")
         self.right_scale_mode.setEnabled(False)
         y2scale_row.addWidget(self.right_scale_mode, 0)
+
         self.right_ymin = QDoubleSpinBox()
         self.right_ymin.setDecimals(6)
         self.right_ymin.setRange(-1e30, 1e30)
         self.right_ymin.setEnabled(False)
         y2scale_row.addWidget(QLabel("Min"))
         y2scale_row.addWidget(self.right_ymin, 1)
+
         self.right_ymax = QDoubleSpinBox()
         self.right_ymax.setDecimals(6)
         self.right_ymax.setRange(-1e30, 1e30)
         self.right_ymax.setEnabled(False)
         y2scale_row.addWidget(QLabel("Max"))
         y2scale_row.addWidget(self.right_ymax, 1)
-        self.right_log = QCheckBox("Log")  # UI만
+
+        self.right_log = QCheckBox("Log")
         self.right_log.setEnabled(False)
         y2scale_row.addWidget(self.right_log, 0)
+
         self.btn_reset_right_scale = QPushButton("Reset R")
         self.btn_reset_right_scale.setEnabled(False)
         self.btn_reset_right_scale.clicked.connect(self.reset_right_scale)
         y2scale_row.addWidget(self.btn_reset_right_scale, 0)
         ctrl_layout.addLayout(y2scale_row)
 
-        self.left_scale_mode.currentIndexChanged.connect(self._update_scale_enable_state)
-        self.right_scale_mode.currentIndexChanged.connect(self._update_scale_enable_state)
+        self.left_scale_mode.selectionChanged.connect(lambda _: self._update_scale_enable_state())
+        self.right_scale_mode.selectionChanged.connect(lambda _: self._update_scale_enable_state())
 
         root.addWidget(self.ctrl_widget)
         self.ctrl_widget.setVisible(False)
 
-        # plot grid
         self.plot_container = QWidget()
+        self.plot_container.setStyleSheet("background: transparent;")
         self.plot_container_layout = QVBoxLayout(self.plot_container)
         self.plot_container_layout.setContentsMargins(0, 0, 0, 0)
         self.plot_container_layout.setSpacing(0)
 
         self.plot_grid = QWidget()
+        self.plot_grid.setStyleSheet("background: transparent;")
         self.plot_grid_layout = QGridLayout(self.plot_grid)
-        self.plot_grid_layout.setContentsMargins(0, 0, 0, 0)
-        self.plot_grid_layout.setHorizontalSpacing(6)
-        self.plot_grid_layout.setVerticalSpacing(6)
+        self.plot_grid_layout.setContentsMargins(10, 10, 10, 10)
+        self.plot_grid_layout.setHorizontalSpacing(12)
+        self.plot_grid_layout.setVerticalSpacing(12)
 
         self.plot_container_layout.addWidget(self.plot_grid, 1)
         root.addWidget(self.plot_container, 1)
@@ -1796,8 +2645,10 @@ class CsvPlotPanel(QWidget):
         self._rebuild_plot_layout(force=True)
 
         self.status = QLabel("")
-        self.status.setStyleSheet("color: gray;")
+        self.status.setStyleSheet("color:#6b7280; padding:4px 2px 2px 2px;")
         root.addWidget(self.status)
+
+        apply_chrome_input_styles(self)
 
     def request_history_for_area(self, area: PlotArea):
         self.historyRequested.emit(area)
@@ -1806,7 +2657,6 @@ class CsvPlotPanel(QWidget):
         self.exportRequested.emit(area)
 
     def request_compare_for_area(self, area: PlotArea):
-        """PlotArea의 Compare 버튼이 눌렸을 때 MainWindow로 요청을 전달."""
         self.compareRequested.emit(area)
 
     def _get_history_df(self, force: bool = False) -> pd.DataFrame:
@@ -1831,11 +2681,9 @@ class CsvPlotPanel(QWidget):
         dlg = HistoryDialog(dfh, parent=self)
 
         def _export_from_dialog():
-            self.export_history_to_excel(dlg.filtered_logs())  # ✅ 선택 기간만 export
+            self.export_history_to_excel(dlg.filtered_logs())
 
         dlg.btn_export.clicked.connect(_export_from_dialog)
-
-        # ✅ 이거 없어서 안 뜨는 거였음
         dlg.exec()
 
     def export_history_to_excel(self, dfh: pd.DataFrame | None = None):
@@ -1858,23 +2706,20 @@ class CsvPlotPanel(QWidget):
         df = dfh.copy()
         df["date_label"] = df["date_dt"].dt.strftime("%Y-%m-%d")
 
-        # 집계들
         daily_total = df.groupby("date_label").size().reset_index(name="runs").sort_values("date_label")
         daily_by_tube = (
             df.pivot_table(index="date_label", columns="tube", values="path", aggfunc="count", fill_value=0)
-            .reset_index()
+              .reset_index()
         )
         daily_by_recipe = (
             df.pivot_table(index="date_label", columns="recipe", values="path", aggfunc="count", fill_value=0)
-            .reset_index()
+              .reset_index()
         )
 
         try:
             with pd.ExcelWriter(save_path, engine="openpyxl") as w:
-                # Raw
                 out_cols = ["path", "tube", "recipe", "job_id", "date", "time", "dt"]
                 df[out_cols].to_excel(w, index=False, sheet_name="raw_files")
-
                 daily_total.to_excel(w, index=False, sheet_name="daily_total")
                 daily_by_tube.to_excel(w, index=False, sheet_name="daily_by_tube")
                 daily_by_recipe.to_excel(w, index=False, sheet_name="daily_by_recipe")
@@ -1886,33 +2731,25 @@ class CsvPlotPanel(QWidget):
 
     @staticmethod
     def _short_compare_label_from_filename(filename: str) -> str:
-        """
-        (튜브)_(레시피)_(JOB)_(날짜)_(시간).csv  ->  (튜브)_(레시피)_(JOB)
-        날짜/시간 포맷이 달라도 '뒤에서 2개 토큰'을 제거하는 방식이라 유연함.
-        """
-        stem = Path(filename).stem  # 확장자 제거
+        stem = Path(filename).stem
         parts = stem.split("_")
         if len(parts) >= 5:
-            parts = parts[:-2]  # 뒤 2개(날짜, 시간) 제거
+            parts = parts[:-2]
         return "_".join(parts) if parts else stem
 
     @staticmethod
     def _detect_step_no_column_in_df(df: pd.DataFrame) -> str | None:
         cols = list(df.columns)
         lower_map = {c: str(c).strip().lower() for c in cols}
-
         candidates = [
             "step no", "stepno", "step number", "stepnumber",
             "step_no", "step-no", "step",
         ]
 
-        # 1) exact
         for c in cols:
             if lower_map[c] in candidates:
                 return c
 
-        # 2) normalized exact/contains
-        import re
         norm_map = {c: re.sub(r"[^a-z0-9]", "", lower_map[c]) for c in cols}
         cand_norm = [re.sub(r"[^a-z0-9]", "", s) for s in candidates]
 
@@ -1933,19 +2770,15 @@ class CsvPlotPanel(QWidget):
     def _detect_step_name_column_in_df(df: pd.DataFrame) -> str | None:
         cols = list(df.columns)
         lower_map = {c: str(c).strip().lower() for c in cols}
-
         candidates = [
             "step name", "stepname", "step desc", "stepdesc", "step description",
             "recipe step name", "recipestepname",
         ]
 
-        # 1) exact
         for c in cols:
             if lower_map[c] in candidates:
                 return c
 
-        # 2) normalized exact/contains
-        import re
         norm_map = {c: re.sub(r"[^a-z0-9]", "", lower_map[c]) for c in cols}
         cand_norm = [re.sub(r"[^a-z0-9]", "", s) for s in candidates]
 
@@ -1964,25 +2797,16 @@ class CsvPlotPanel(QWidget):
 
     @staticmethod
     def _filter_df_by_step_no(df: pd.DataFrame, step_col: str, step_txt: str) -> pd.DataFrame:
-        """
-        step_txt:
-          - ""  : 필터 없음
-          - "12": 숫자면 numeric 비교 우선
-          - 그 외: 문자열 비교
-        """
         if not step_txt:
             return df
 
         s = df[step_col]
-
-        # 숫자 입력이면 numeric 비교 우선
         try:
             target = int(step_txt)
             sn = pd.to_numeric(s, errors="coerce")
             m = sn.notna() & (sn.astype("int64") == target)
             return df.loc[m].copy()
         except Exception:
-            # 문자열 비교 fallback
             m = s.astype(str).str.strip() == step_txt
             return df.loc[m].copy()
 
@@ -1990,12 +2814,11 @@ class CsvPlotPanel(QWidget):
         common: set[str] | None = None
         for p in paths:
             try:
-                df = pd.read_csv(p, low_memory=False, nrows=200)  # 헤더/샘플만
+                df = pd.read_csv(p, low_memory=False, nrows=200)
                 df = self._normalize_columns(df)
             except Exception:
                 continue
 
-            # 첫 컬럼(X) 제외하고 numeric 가능한 컬럼만
             cols = []
             for c in df.columns[1:]:
                 s = pd.to_numeric(df[c], errors="coerce")
@@ -2013,7 +2836,7 @@ class CsvPlotPanel(QWidget):
         if not paths:
             return
 
-        self._mode = "compare"  # ✅ Compare 모드
+        self._mode = "compare"
 
         common_cols = self._common_numeric_columns(paths)
         if not common_cols:
@@ -2029,7 +2852,6 @@ class CsvPlotPanel(QWidget):
             QMessageBox.information(self, "Compare", "Select Y columns to compare.")
             return
 
-        # ✅ target_area가 없으면 첫 그래프를 사용 (fallback)
         if not self._areas:
             a0 = PlotArea(self)
             self._areas.append(a0)
@@ -2081,9 +2903,8 @@ class CsvPlotPanel(QWidget):
             except Exception:
                 continue
 
-            # ✅ Step No 필터
             step_col = self._detect_step_no_column_in_df(df)
-            step_name_col = self._detect_step_name_column_in_df(df)  # ✅ 추가
+            step_name_col = self._detect_step_name_column_in_df(df)
 
             if step_txt:
                 if not step_col or step_col not in df.columns:
@@ -2092,22 +2913,21 @@ class CsvPlotPanel(QWidget):
                 if df.empty:
                     continue
 
-                # ✅ Step Name 수집 (가능하면)
                 if step_name_col and step_name_col in df.columns:
                     sn_series = df[step_name_col].astype(str).str.strip()
-                    sn_series = sn_series[sn_series.notna() & (sn_series != "") & (sn_series.str.lower() != "nan")]
+                    sn_series = sn_series[
+                        sn_series.notna() & (sn_series != "") & (sn_series.str.lower() != "nan")
+                    ]
                     if not sn_series.empty:
                         step_names.add(sn_series.iloc[0])
 
-            # ✅ X 처리 + 정렬
             x_raw = df[df.columns[0]]
             x_dt = pd.to_datetime(x_raw, errors="coerce")
             is_dt = x_dt.notna().sum() >= int(len(x_raw) * 0.8)
 
             if "Elapsed" in x_mode:
                 if not is_dt:
-                    continue  # elapsed는 datetime 기반만
-                # 시간으로 정렬 후 elapsed 계산
+                    continue
                 tmp = df.copy()
                 tmp["_xdt"] = x_dt
                 tmp = tmp.dropna(subset=["_xdt"])
@@ -2119,14 +2939,12 @@ class CsvPlotPanel(QWidget):
                 x_vals = (tmp["_xdt"] - t0).dt.total_seconds().astype("float64")
                 df_use = tmp
             else:
-                # Index 비교: (필터 후) 원본 순서 유지가 싫으면 아래처럼 X(시간) 있으면 정렬
                 df_use = df.copy()
                 if is_dt:
                     df_use["_xdt"] = x_dt
                     df_use = df_use.sort_values("_xdt").reset_index(drop=True)
                 else:
                     df_use = df_use.reset_index(drop=True)
-
                 x_vals = pd.Series(range(len(df_use)), dtype="float64")
 
             for yc in y_cols:
@@ -2202,16 +3020,10 @@ class CsvPlotPanel(QWidget):
         area.compare_full_xmin = float(global_xmin)
         area.compare_full_xmax = float(global_xmax)
 
-        # Reset Zoom은 그래프들 중 하나라도 compare면 활성화
         self.btn_reset_zoom.setEnabled(True)
-
-        # ✅ [FIX] Compare로 처음 열린 경우에도 그래프 추가 가능하도록
         self.btn_add_graph.setEnabled(True)
 
     def reset_zoom(self):
-        """✅ X축을 전체 범위로 초기화 (Normal/Compare 모두 지원)"""
-
-        # ✅ compare 그래프가 하나라도 있으면: compare_active인 area들만 각자 원복
         any_compare = any(a.compare_active for a in self._areas)
         if any_compare:
             did = False
@@ -2228,7 +3040,6 @@ class CsvPlotPanel(QWidget):
                 self.status.setText("Compare zoom reset completed (full scale)")
             return
 
-        # ----- 이하 기존 normal mode 로직 그대로 -----
         if self.df is None or "_x" not in self.df.columns:
             return
 
@@ -2244,6 +3055,7 @@ class CsvPlotPanel(QWidget):
             self.num_end.setValue(float(self._full_x_max_num))
 
         self.status.setText("Zoom reset completed (full scale)")
+        self._refresh_x_range_buttons()
         self.plot()
 
     def _desired_cols(self) -> int:
@@ -2329,14 +3141,12 @@ class CsvPlotPanel(QWidget):
         )
         return df
 
-    def _set_combos_items(self, combos: list[QComboBox], items: list[str]):
+    def _set_combos_items(self, combos, items: list[str]):
         for cb in combos:
-            cb.blockSignals(True)
             cb.clear()
             cb.addItem(NONE_ITEM)
             cb.addItems(items)
-            cb.setCurrentIndex(0)
-            cb.blockSignals(False)
+            cb.setCurrentText(NONE_ITEM)
 
     def _selected_cols(self, combos: list[QComboBox]) -> list[str]:
         cols: list[str] = []
@@ -2403,13 +3213,14 @@ class CsvPlotPanel(QWidget):
             for c in cols:
                 if lower_map[c] in candidates:
                     return c
-            import re
+
             norm_map = {c: re.sub(r"[^a-z0-9]", "", lower_map[c]) for c in cols}
             for c in cols:
                 for cand in candidates:
                     cand2 = re.sub(r"[^a-z0-9]", "", cand)
                     if cand2 and cand2 == norm_map[c]:
                         return c
+
             for c in cols:
                 v = norm_map[c]
                 for cand in candidates:
@@ -2474,33 +3285,23 @@ class CsvPlotPanel(QWidget):
         return step_no, step_name
 
     def _step_info_at_x_value(self, x_value: float) -> tuple[str | None, str | None]:
-        """
-        crosshair에서 얻은 x_value(ms epoch)로 Step No/Name을 찾는다.
-        plot에서 ms 계산에 사용한 방식(timestamp())과 동일하게 맞추기 위해
-        fromtimestamp()를 사용한다. (timezone mismatch 최소화)
-        """
         if not self.x_is_datetime:
             return None, None
         try:
-            # x_value는 ms
             t = pd.Timestamp.fromtimestamp(float(x_value) / 1000.0)
         except Exception:
             return None, None
         return self._step_info_at(t)
 
-    # -----------------------------
-    # CSV load
-    # -----------------------------
     def load_csv(self, path: str | Path):
         path = Path(path)
         self.csv_path = path
-        self._mode = "single"  # ✅ CSV 로드 시 일반 모드
-        # ✅ CSV 로드 시: 모든 area의 compare 상태 해제
+        self._mode = "single"
         for a in self._areas:
             a.compare_active = False
             a.compare_full_xmin = None
             a.compare_full_xmax = None
-        self.title.setText(f"Selected CSV: {path}")
+        self.title.setText(f"Selected CSV: {path.name}")
 
         try:
             df = pd.read_csv(path, low_memory=False)
@@ -2519,7 +3320,6 @@ class CsvPlotPanel(QWidget):
         x_dt = pd.to_datetime(x_series, errors="coerce")
         valid_dt = int(x_dt.notna().sum())
 
-        # ✅ full range 초기화 값들
         self._full_x_min_dt = None
         self._full_x_max_dt = None
         self._full_x_min_num = None
@@ -2528,11 +3328,8 @@ class CsvPlotPanel(QWidget):
         if valid_dt > 0 and valid_dt >= int(len(x_series) * 0.8):
             self.x_is_datetime = True
             df["_x"] = x_dt
-
-            # ✅ 최소 줌 범위: 2초(2000ms)
             self._min_zoom_span = 2000.0
 
-            # ✅ full range 저장
             x_valid = df["_x"].dropna()
             if not x_valid.empty:
                 xmin = pd.Timestamp(x_valid.min())
@@ -2551,7 +3348,6 @@ class CsvPlotPanel(QWidget):
             else:
                 df["_x"] = x_num
 
-            # ✅ numeric이면 step(중앙값) 추정 → 최소 줌 = 2*step (fallback=0)
             xv = pd.to_numeric(df["_x"], errors="coerce").dropna().sort_values()
             step = 0.0
             if len(xv) >= 3:
@@ -2561,7 +3357,6 @@ class CsvPlotPanel(QWidget):
                     step = float(diffs.median())
             self._min_zoom_span = float(step * 2.0) if step > 0 else 0.0
 
-            # ✅ full range 저장
             if not xv.empty:
                 self._full_x_min_num = float(xv.min())
                 self._full_x_max_num = float(xv.max())
@@ -2607,7 +3402,10 @@ class CsvPlotPanel(QWidget):
             self._clear_plot_all()
             return
 
-        self.y_combos[0].setCurrentIndex(1)
+        if len(y_candidates) > 0:
+            self.y_combos[0].setCurrentText(y_candidates[0])
+        else:
+            self.y_combos[0].setCurrentText(NONE_ITEM)
 
         default_left = self._selected_cols(self.y_combos)
         for a in self._areas:
@@ -2634,6 +3432,8 @@ class CsvPlotPanel(QWidget):
         self.dt_end.setMinimumDateTime(qmin)
         self.dt_end.setMaximumDateTime(qmax)
 
+        self._refresh_x_range_buttons()
+
     def _setup_x_range_numeric(self, x_num: pd.Series):
         x_valid = pd.to_numeric(x_num, errors="coerce").dropna()
         if x_valid.empty:
@@ -2649,11 +3449,22 @@ class CsvPlotPanel(QWidget):
         self.num_start.setValue(xmin)
         self.num_end.setValue(xmax)
 
+        self._refresh_x_range_buttons()
+
+    def _refresh_x_range_buttons(self):
+        if self.x_is_datetime:
+            s = self.dt_start.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+            e = self.dt_end.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+            self.btn_dt_range.setText(f"{s}  ~  {e}")
+        else:
+            s = f"{self.num_start.value():.6g}"
+            e = f"{self.num_end.value():.6g}"
+            self.btn_num_range.setText(f"{s}  ~  {e}")
+
     def _clear_plot_all(self):
         for a in self._areas:
             a.clear()
 
-    # Alarm helpers
     def _get_alarm_date_yyMMdd(self) -> str | None:
         if self.df is None or "_x" not in self.df.columns:
             return None
@@ -2721,15 +3532,12 @@ class CsvPlotPanel(QWidget):
         filtered = filtered.sort_values("_t")
         return filtered
 
-    # Dialog openers
     def _open_y_scale_dialog(self, side: str, area: PlotArea | None = None):
-        # ✅ Compare 그래프라면: 현재 axis 값으로 다이얼로그를 띄우고, 적용도 axis에 직접
         if area is not None and area.compare_active:
             ax = area.axis_y_left if side == "left" else area.axis_y_right
             if ax is None:
                 return
 
-            # 현재 축 상태를 dialog 초기값으로 사용
             cur_mode = "Auto"
             cur_ymin = float(ax.min())
             cur_ymax = float(ax.max())
@@ -2755,9 +3563,7 @@ class CsvPlotPanel(QWidget):
                     ymin, ymax = ymax, ymin
                 ax.setRange(float(ymin), float(ymax))
             else:
-                # Auto: series 전체 min/max로 재설정
                 ymin2, ymax2 = None, None
-
                 series_list = area.left_series if side == "left" else area.right_series
                 for s in series_list:
                     try:
@@ -2775,11 +3581,8 @@ class CsvPlotPanel(QWidget):
                     ymax2 = ymin2 + 1.0
                 ax.setRange(float(ymin2), float(ymax2))
                 ax.applyNiceNumbers()
-
-            # Compare는 plot()을 안 타니까 여기서 끝
             return
 
-        # ----- 이하: 기존 Normal 모드 로직 그대로 -----
         if side == "left":
             dlg = YScaleDialog(
                 title="Left Y Scale",
@@ -2818,6 +3621,7 @@ class CsvPlotPanel(QWidget):
                 self.right_ymax.setValue(ymax)
 
         self._update_scale_enable_state()
+        self._refresh_x_range_buttons()
         self.plot()
 
     def _open_x_range_dialog(self):
@@ -2848,7 +3652,6 @@ class CsvPlotPanel(QWidget):
 
         v0, v1 = dlg.values()
 
-        # ✅ 다이얼로그로 범위 지정 시에도 최소 줌 범위 제한
         if self.x_is_datetime:
             ms0 = float(v0.toMSecsSinceEpoch())
             ms1 = float(v1.toMSecsSinceEpoch())
@@ -2873,7 +3676,6 @@ class CsvPlotPanel(QWidget):
         if not items:
             return
 
-        cur = []
         if area is not None:
             cur = area.left_cols[:] if side == "left" else area.right_cols[:]
         else:
@@ -2933,7 +3735,6 @@ class CsvPlotPanel(QWidget):
             self.status.setText("Compare zoom applied")
             return
 
-        # ----- 이하 기존 normal mode 로직 그대로 -----
         if self.x_is_datetime:
             min_span = max(2000.0, self._min_zoom_span)
             if (xmax - xmin) < min_span:
@@ -2951,7 +3752,6 @@ class CsvPlotPanel(QWidget):
             self.num_end.setValue(float(xmax))
 
         area.update_reference_lines()
-
         self.plot()
 
     @staticmethod
@@ -2961,9 +3761,6 @@ class CsvPlotPanel(QWidget):
             return None, None
         return float(s.min()), float(s.max())
 
-    # -----------------------------
-    # plot
-    # -----------------------------
     def plot(self):
         if self.df is None or self.csv_path is None:
             return
@@ -3019,10 +3816,7 @@ class CsvPlotPanel(QWidget):
         else:
             events = None
 
-        for idx, area in enumerate(self._areas):
-
-            # ✅ Compare로 만들어진 그래프는 plot()에서 건드리지 않는다
-            # (add_graph / clear_left/right / reset zoom 등으로 plot()이 호출돼도 compare 유지)
+        for area in self._areas:
             if area.compare_active:
                 try:
                     area.view._layout_bands()
@@ -3051,7 +3845,6 @@ class CsvPlotPanel(QWidget):
             chart.setTitle("")
             chart.legend().setVisible(True)
 
-            # axes
             if self.x_is_datetime:
                 ax_x = QDateTimeAxis()
                 ax_x.setFormat("MM-dd HH:mm")
@@ -3180,7 +3973,6 @@ class CsvPlotPanel(QWidget):
                         ymin, ymax = ymax, ymin
                     ax_r.setRange(ymin, ymax)
 
-            # alarms
             if events is not None and not events.empty and self.x_is_datetime:
                 y_marker = ax_l.min() + (ax_l.max() - ax_l.min()) * 0.02
 
@@ -3198,18 +3990,15 @@ class CsvPlotPanel(QWidget):
                 area.alarm_series = alarm
                 area._alarm_map.clear()
 
-                # ✅ ms 기준으로 그룹화 (ms -> {"ts": Timestamp, "time_str": str, "texts": [..]})
                 grouped: dict[int, dict[str, object]] = {}
 
                 for t, txt in zip(events["_t"].tolist(), events["Text"].tolist()):
                     ts = pd.Timestamp(t)
-
-                    # ✅ 라인과 동일 방식으로 ms 계산(점 위치 유지)
                     ms = int(ts.to_pydatetime().timestamp() * 1000)
 
                     if ms not in grouped:
                         grouped[ms] = {
-                            "ts": ts,  # ✅ 원본 Timestamp 보관 (step 매칭용)
+                            "ts": ts,
                             "time_str": ts.strftime("%Y-%m-%d %H:%M:%S"),
                             "texts": []
                         }
@@ -3218,8 +4007,7 @@ class CsvPlotPanel(QWidget):
                 for ms in sorted(grouped.keys()):
                     alarm.append(ms, y_marker)
 
-                    # ✅ 여기서 epoch->Timestamp 재생성 금지!
-                    ts_for_step = grouped[ms]["ts"]  # ✅ 원본 알람 시간 사용
+                    ts_for_step = grouped[ms]["ts"]
                     sn, sname = self._step_info_at(ts_for_step)
 
                     time_str = str(grouped[ms]["time_str"])
@@ -3242,102 +4030,10 @@ class CsvPlotPanel(QWidget):
             area.update_reference_lines()
 
         self.status.setText(
-            f"표시 중: {len(df)} rows | Graphs={len(self._areas)} | (ResetZoom=전체복귀 · X click=range · X drag=zoom(>=2s) · Y band=scale)"
+            f"표시 중: {len(df)} rows | Graphs={len(self._areas)} | "
+            f"(ResetZoom=전체복귀 · X click=range · X drag=zoom(>=2s) · Y band=scale)"
         )
 
-
-class TreeFilterProxyModel(QSortFilterProxyModel):
-    """
-    QFileSystemModel용 트리 검색/필터
-    - 파일명/경로 기준으로 필터
-    - 디렉터리는 하위에 매칭 항목이 있으면 표시
-    """
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._filter_text = ""
-
-    def setFilterText(self, text: str):
-        self._filter_text = (text or "").strip().lower()
-        self.invalidateFilter()
-
-    def filterAcceptsRow(self, source_row, source_parent):
-        if not self._filter_text:
-            return True
-
-        model = self.sourceModel()
-        idx = model.index(source_row, 0, source_parent)
-        if not idx.isValid():
-            return False
-
-        name = str(model.fileName(idx)).lower()
-        path = str(model.filePath(idx)).lower()
-
-        # 자기 자신이 매칭되면 표시
-        if self._filter_text in name or self._filter_text in path:
-            return True
-
-        # 폴더면 하위에 매칭 항목이 있으면 표시
-        if model.isDir(idx):
-            for i in range(model.rowCount(idx)):
-                if self.filterAcceptsRow(i, idx):
-                    return True
-
-        return False
-
-
-class FilterableList(QWidget):
-    """
-    QListWidget + 검색창(QLineEdit)
-    - 타이핑 시 매칭 안되는 항목 숨김
-    - 선택 상태는 유지됨(숨겨져도 선택은 유지될 수 있음)
-    """
-    def __init__(self, items: list[str], *, placeholder: str = "Search...", parent=None):
-        super().__init__(parent)
-
-        self.search = QLineEdit()
-        self.search.setPlaceholderText(placeholder)
-
-        self.listw = QListWidget()
-        self.listw.setSelectionMode(QAbstractItemView.MultiSelection)
-
-        for t in items:
-            self.listw.addItem(QListWidgetItem(t))
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(6)
-        lay.addWidget(self.search, 0)
-        lay.addWidget(self.listw, 1)
-
-        self.search.textChanged.connect(self._apply_filter)
-
-    def _apply_filter(self, text: str):
-        q = (text or "").strip().lower()
-        for i in range(self.listw.count()):
-            it = self.listw.item(i)
-            if not q:
-                it.setHidden(False)
-            else:
-                it.setHidden(q not in it.text().lower())
-
-    def set_selected(self, selected: list[str]):
-        sel = set(selected)
-        for i in range(self.listw.count()):
-            it = self.listw.item(i)
-            it.setSelected(it.text() in sel)
-
-    def selected_texts(self) -> list[str]:
-        return [i.text() for i in self.listw.selectedItems()]
-
-    def clear_selection(self):
-        """전체 선택 해제(숨김 상태 포함 전부 해제)"""
-        self.listw.blockSignals(True)
-        try:
-            for i in range(self.listw.count()):
-                it = self.listw.item(i)
-                it.setSelected(False)
-        finally:
-            self.listw.blockSignals(False)
 
 # =========================================================
 # MainWindow
@@ -3360,6 +4056,7 @@ class MainWindow(QMainWindow):
         splitter.setChildrenCollapsible(False)
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
+        splitter.setHandleWidth(10)
 
         self.model = QFileSystemModel()
         self.model.setRootPath(str(self.root_dir))
@@ -3372,37 +4069,85 @@ class MainWindow(QMainWindow):
 
         self.tree_search = QLineEdit()
         self.tree_search.setPlaceholderText("Search files/folders...")
+        self.tree_search.setClearButtonEnabled(True)
         self.tree_search.textChanged.connect(self.on_tree_search_changed)
+        self.tree_search.setStyleSheet(
+            "QLineEdit{"
+            "background:white;"
+            "border:1px solid #d9dee7;"
+            "border-radius:12px;"
+            "padding:8px 10px;"
+            "font-size:12px;"
+            "}"
+            "QLineEdit:focus{border:1px solid #60a5fa;}"
+        )
 
         self.tree = QTreeView()
         self.tree.setModel(self.proxy_model)
         self.tree.setRootIndex(self.proxy_model.mapFromSource(self.model.index(str(self.root_dir))))
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setStyleSheet(
+            "QTreeView{"
+            "background:white;"
+            "border:1px solid #d9dee7;"
+            "padding:6px;"
+            "alternate-background-color:#f8fafc;"
+            "}"
+            "QTreeView::item{padding: 4px 2px;}"
+            "QTreeView::item:hover{background: #e6f4f7;}"
+            "QTreeView::item:selected{background: #cfe8f0; color: #111827;}"
+            "QHeaderView::section{"
+            "background:#f8fafc;"
+            "border:none;"
+            "border-bottom:1px solid #e5e7eb;"
+            "padding:8px;"
+            "font-weight:600;"
+            "color:#6b7280;"
+            "}"
+        )
 
         for col in range(self.model.columnCount()):
-            if col not in (0, 3):  # 0: Name, 3: Date Modified
+            if col not in (0, 3):
                 self.tree.hideColumn(col)
 
         self.tree.setAnimated(True)
         self.tree.setSortingEnabled(True)
-        self.tree.sortByColumn(3, Qt.AscendingOrder)  # 시간순
+        self.tree.sortByColumn(3, Qt.AscendingOrder)
         self.tree.doubleClicked.connect(self.on_tree_double_clicked)
-        self.tree.setMinimumWidth(240)
+        self.tree.setMinimumWidth(260)
         self.tree.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         left_panel = QWidget()
+        left_panel.setStyleSheet("background: transparent;")
         left_lay = QVBoxLayout(left_panel)
-        left_lay.setContentsMargins(0, 0, 0, 0)
-        left_lay.setSpacing(6)
-        left_lay.addWidget(self.tree_search, 0)
-        left_lay.addWidget(self.tree, 1)
+        left_lay.setContentsMargins(6, 6, 6, 6)
+        left_lay.setSpacing(0)
 
+        self.tree_card = QWidget()
+        self.tree_card.setObjectName("treeCard")
+        self.tree_card.setStyleSheet("""
+        QWidget#treeCard {
+            background: white;
+            border: 1px solid #d9dee7;
+            border-radius: 18px;
+        }
+        """)
+        apply_shadow(self.tree_card, blur=26, y_offset=4)
+
+        tree_card_lay = QVBoxLayout(self.tree_card)
+        tree_card_lay.setContentsMargins(10, 10, 10, 10)
+        tree_card_lay.setSpacing(0)
+        tree_card_lay.addWidget(self.tree_search, 0)
+        tree_card_lay.addWidget(self.tree, 1)
+
+        left_lay.addWidget(self.tree_card, 1)
         splitter.addWidget(left_panel)
 
         self.plot_panel = CsvPlotPanel(alarm_dir=self.alarm_dir)
-        self.plot_panel.root_dir = self.root_dir  # ✅ 하드코딩 root_dir 주입
-        self.plot_panel.historyRequested.connect(self.on_history_requested)  # ✅ 추가
-        self.plot_panel.exportRequested.connect(self.on_export_requested)  # ✅ 추가
+        self.plot_panel.root_dir = self.root_dir
+        self.plot_panel.historyRequested.connect(self.on_history_requested)
+        self.plot_panel.exportRequested.connect(self.on_export_requested)
         self.plot_panel.setMinimumWidth(0)
         self.plot_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.plot_panel.btn_compare.clicked.connect(self.on_compare_selected)
@@ -3422,14 +4167,12 @@ class MainWindow(QMainWindow):
             self.tree.setRootIndex(self.proxy_model.mapFromSource(self.model.index(str(self.root_dir))))
 
     def on_history_requested(self, area):
-        # area는 현재 그래프(PlotArea)지만, 지금 요구사항은 "전체 로그의 날짜별 횟수"라 area는 참고용
         self.plot_panel.show_history_dialog(area)
 
     def on_export_requested(self, area):
         self.plot_panel.export_history_to_excel()
 
     def on_compare_requested(self, area):
-        # 트리에서 선택된 csv들 가져오기
         idxs = self.tree.selectionModel().selectedRows()
         paths = []
         for idx in idxs:
@@ -3479,6 +4222,7 @@ def set_appusermodel_id(app_id: str):
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
 
+
 def main():
     logger.info("[APP] starting")
 
@@ -3487,18 +4231,22 @@ def main():
     icon_path = resource_path("icons/LP_icon_big.ico")
 
     app = QApplication(sys.argv)
+    QApplication.setStyle("Fusion")
+    app.setStyle(ChromeProxyStyle())
     app.setWindowIcon(QIcon(icon_path))
+    app.setStyleSheet(build_app_stylesheet())
 
-    root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
-    # root_dir = r"C:\hmi\System\RecipeProcLog"
-    alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
-    # alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
+    # root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
+    root_dir = r"C:\hmi\System\RecipeProcLog"
+    # alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
+    alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
 
     logger.info(f"[APP] paths root_dir={root_dir}, alarm_dir={alarm_dir}")
 
     win = MainWindow(root_dir=root_dir, alarm_dir=alarm_dir)
     win.setWindowIcon(QIcon(icon_path))
     win.show()
+
     rc = app.exec()
     logger.info(f"[APP] exit code={rc}")
     sys.exit(rc)
