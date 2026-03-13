@@ -1017,6 +1017,24 @@ class RefLineDialog(QDialog):
             background: transparent;
             color: #1f2937;
         }
+        QCheckBox {
+            spacing: 10px;
+            padding: 6px 8px;
+        }
+        QCheckBox::indicator {
+            width: 18px;
+            height: 18px;
+        }
+        QCheckBox::indicator:unchecked {
+            border: 1px solid #cbd5e1;
+            border-radius: 5px;
+            background: white;
+        }
+        QCheckBox::indicator:checked {
+            border: 1px solid #2563eb;
+            border-radius: 5px;
+            background: #2563eb;
+        }
         QComboBox, QDateTimeEdit, QDoubleSpinBox {
             background: white;
             color: #1f2937;
@@ -1620,7 +1638,7 @@ class PlotArea:
 
         self.btn_delete = QPushButton("✕")
         self.btn_delete.setToolTip("Delete this graph")
-        self.btn_delete.setFixedSize(30, 30)
+        self.btn_delete.setFixedSize(35, 30)
         self.btn_delete.setCursor(Qt.PointingHandCursor)
         self.btn_delete.setStyleSheet(
             "QPushButton{"
@@ -1637,7 +1655,7 @@ class PlotArea:
 
         self.btn_menu = QPushButton("⋯")
         self.btn_menu.setToolTip("Graph menu")
-        self.btn_menu.setFixedSize(30, 30)
+        self.btn_menu.setFixedSize(35, 30)
         self.btn_menu.setCursor(Qt.PointingHandCursor)
         self.btn_menu.setStyleSheet(
             "QPushButton{"
@@ -4236,10 +4254,10 @@ def main():
     app.setWindowIcon(QIcon(icon_path))
     app.setStyleSheet(build_app_stylesheet())
 
-    # root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
-    root_dir = r"C:\hmi\System\RecipeProcLog"
-    # alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
-    alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
+    root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
+    # root_dir = r"C:\hmi\System\RecipeProcLog"
+    alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
+    # alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
 
     logger.info(f"[APP] paths root_dir={root_dir}, alarm_dir={alarm_dir}")
 
