@@ -27,7 +27,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCharts import (
     QChart, QChartView, QLineSeries, QScatterSeries,
     QValueAxis, QDateTimeAxis,
-    QBarSeries, QStackedBarSeries, QBarSet, QBarCategoryAxis
+    QBarSeries, QStackedBarSeries, QBarSet, QBarCategoryAxis,
+    QPieSeries
 )
 
 import ctypes
@@ -2394,6 +2395,16 @@ class HistoryDialog(QDialog):
         self.view.setStyleSheet("background:white; border:1px solid #dde3ec; border-radius:16px;")
         apply_shadow(self.view, blur=24, y_offset=4)
 
+        self.pie_chart = QChart()
+        self.pie_chart.legend().setVisible(True)
+        self.pie_chart.legend().setAlignment(Qt.AlignBottom)
+        self.pie_chart.setBackgroundVisible(False)
+        self.pie_chart.setPlotAreaBackgroundVisible(False)
+
+        self.pie_view = HistoryChartView(self.pie_chart)
+        self.pie_view.setStyleSheet("background:white; border:1px solid #dde3ec; border-radius:16px;")
+        apply_shadow(self.pie_view, blur=24, y_offset=4)
+
         self.raw_table = QTableWidget()
         self.raw_table.setColumnCount(0)
         self.raw_table.setRowCount(0)
@@ -2430,9 +2441,15 @@ class HistoryDialog(QDialog):
         }
         """)
 
+        charts_row = QHBoxLayout()
+        charts_row.setContentsMargins(0, 0, 0, 0)
+        charts_row.setSpacing(12)
+        charts_row.addWidget(self.view, 3)
+        charts_row.addWidget(self.pie_view, 2)
+
         lay = QVBoxLayout(self)
         lay.addLayout(top)
-        lay.addWidget(self.view, 3)
+        lay.addLayout(charts_row, 3)
         lay.addWidget(self.raw_table, 2)
 
         self._series: QBarSeries | None = None
@@ -2441,6 +2458,104 @@ class HistoryDialog(QDialog):
 
         self._refresh_date_range_button()
         self.reload_data()
+
+    def _make_pie_data(self) -> tuple[str, dict[str, int]]:
+        """
+        선택 기간 전체 run을 집계해서 pie chart용 데이터 생성.
+        return:
+            title_mode: "Total" / "tube" / "recipe" / 기타 group 컬럼명
+            counts: {"TUBE01": 12, "TUBE02": 8, ...}
+        """
+        df = self.filtered_logs().copy()
+        if df.empty:
+            return "Total", {}
+
+        mode = self.group_by.currentText()
+
+        if mode == "Total":
+            gcol = "tube" if "tube" in df.columns else None
+            if gcol is None:
+                return "Total", {"Total Runs": int(len(df))}
+            vc = df[gcol].astype(str).str.strip().replace("", "(blank)").value_counts()
+            return "tube", {str(k): int(v) for k, v in vc.items()}
+
+        gcol = mode
+        if gcol not in df.columns:
+            return mode, {}
+
+        s = df[gcol].astype(str).fillna("").str.strip()
+        s = s.replace("", "(blank)")
+        vc = s.value_counts(dropna=False)
+
+        return mode, {str(k): int(v) for k, v in vc.items()}
+
+    def _rebuild_pie_chart(self):
+        self.pie_chart.removeAllSeries()
+
+        title_mode, counts = self._make_pie_data()
+
+        # recipe일 때만 top4 + Others 처리
+        if title_mode == "recipe":
+            counts = self._collapse_recipe_top4(counts)
+
+        if not counts:
+            self.pie_chart.setTitle("No data for pie chart")
+            return
+
+        series = QPieSeries()
+        colors = self._unique_colors()
+        total = sum(counts.values())
+
+        items = list(counts.items())
+
+        # Total 아닐 때만 bar chart 순서 맞추기
+        if title_mode != "Total":
+            items.sort(key=lambda x: x[0])  # bar chart와 동일한 key 정렬
+
+        for label, value in items:
+            slice_ = series.append(str(label), float(value))
+            color = QColor(next(colors))
+            slice_.setBrush(QBrush(color))
+
+            pen = QPen(QColor("white"))
+            pen.setWidth(1)
+            slice_.setPen(pen)
+
+            pct = (value / total * 100.0) if total > 0 else 0.0
+            slice_.setLabel(f"{label} ({value}, {pct:.1f}%)")
+            slice_.setLabelVisible(True)
+
+        self.pie_chart.addSeries(series)
+
+        # 범례에서는 숫자 제거
+        for marker in self.pie_chart.legend().markers(series):
+            marker.setLabel(marker.label().split("(")[0].strip())
+
+        abort_tag = " | Abort only" if self.abort_only_cb.isChecked() else ""
+        if title_mode == "Total":
+            self.pie_chart.setTitle(f"Total runs in selected period{abort_tag}")
+        else:
+            extra = " (Top 4 + Others)" if title_mode == "recipe" else ""
+            self.pie_chart.setTitle(f"Run share by {title_mode}{extra}{abort_tag}")
+
+    def _collapse_recipe_top4(self, counts: dict[str, int]) -> dict[str, int]:
+        """
+        recipe 기준일 때만 상위 4개를 남기고 나머지는 Others로 합친다.
+        """
+        items = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+
+        if len(items) <= 4:
+            return dict(items)
+
+        top4 = items[:4]
+        rest = items[4:]
+
+        out = dict(top4)
+        other_sum = sum(v for _, v in rest)
+        if other_sum > 0:
+            out["Others"] = other_sum
+
+        return out
 
     def _refresh_raw_table(self):
         df = self.filtered_logs().copy()
@@ -2743,6 +2858,7 @@ class HistoryDialog(QDialog):
 
         abort_tag = " | Abort only" if self.abort_only_cb.isChecked() else ""
         self.chart.setTitle(f"Runs per day (group by: {mode}{abort_tag})")
+        self._rebuild_pie_chart()
 
 
 class CompareDialog(QDialog):
