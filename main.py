@@ -21,13 +21,17 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QGridLayout, QRubberBand,
     QSizePolicy, QLineEdit, QFileDialog, QDateEdit, QMenu,
     QGraphicsLineItem, QGraphicsRectItem, QGraphicsEllipseItem,
-    QProxyStyle, QStyle, QGraphicsDropShadowEffect
+    QProxyStyle, QStyle, QGraphicsDropShadowEffect,
+    QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PySide6.QtCharts import (
     QChart, QChartView, QLineSeries, QScatterSeries,
     QValueAxis, QDateTimeAxis,
     QBarSeries, QStackedBarSeries, QBarSet, QBarCategoryAxis
 )
+
+import ctypes
+from ctypes import wintypes
 
 # -----------------------------
 # logger fallback
@@ -59,6 +63,19 @@ class LogMeta:
 
 DATE_RE8 = re.compile(r"^\d{8}$")
 TIME_RE4_6 = re.compile(r"^\d{4}(\d{2})?$")
+
+
+@dataclass(frozen=True)
+class HistoryLogMeta:
+    path: Path
+    tube: str
+    recipe_from_filename: str
+    recipe_name: str
+    job_id: str
+    date_str: str
+    time_str: str
+    dt: pd.Timestamp | None
+    is_abort: bool
 
 
 class DateRangeDialog(QDialog):
@@ -95,6 +112,86 @@ class DateRangeDialog(QDialog):
 
     def values(self):
         return self.date_from.date(), self.date_to.date()
+
+
+class AppSettingsDialog(QDialog):
+    def __init__(self, root_dir: str = "", alarm_dir: str = "", history_dir: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+
+        self.root_edit = QLineEdit(root_dir)
+        self.alarm_edit = QLineEdit(alarm_dir)
+        self.history_edit = QLineEdit(history_dir)
+
+        self.root_btn = QPushButton("Browse...")
+        self.alarm_btn = QPushButton("Browse...")
+        self.history_btn = QPushButton("Browse...")
+
+        self.root_btn.clicked.connect(lambda: self._pick_dir(self.root_edit))
+        self.alarm_btn.clicked.connect(lambda: self._pick_dir(self.alarm_edit))
+        self.history_btn.clicked.connect(lambda: self._pick_dir(self.history_edit))
+
+        form = QFormLayout()
+
+        row1 = QHBoxLayout()
+        row1.addWidget(self.root_edit, 1)
+        row1.addWidget(self.root_btn, 0)
+        form.addRow("Root dir", row1)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(self.alarm_edit, 1)
+        row2.addWidget(self.alarm_btn, 0)
+        form.addRow("Alarm dir", row2)
+
+        row3 = QHBoxLayout()
+        row3.addWidget(self.history_edit, 1)
+        row3.addWidget(self.history_btn, 0)
+        form.addRow("History dir", row3)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self.reject)
+
+        lay = QVBoxLayout(self)
+        lay.addLayout(form)
+        lay.addWidget(btns)
+
+        apply_chrome_input_styles(self)
+
+    def _pick_dir(self, edit: QLineEdit):
+        start = edit.text().strip() or str(Path.cwd())
+        path = QFileDialog.getExistingDirectory(self, "Select directory", start)
+        if path:
+            edit.setText(path)
+
+    def _on_accept(self):
+        root_dir = self.root_edit.text().strip()
+        alarm_dir = self.alarm_edit.text().strip()
+        history_dir = self.history_edit.text().strip()
+
+        if not root_dir:
+            QMessageBox.warning(self, "Settings", "root_dir를 입력해줘.")
+            return
+        if not Path(root_dir).exists():
+            QMessageBox.warning(self, "Settings", "root_dir 경로가 존재하지 않아.")
+            return
+
+        if alarm_dir and not Path(alarm_dir).exists():
+            QMessageBox.warning(self, "Settings", "alarm_dir 경로가 존재하지 않아.")
+            return
+
+        if history_dir and not Path(history_dir).exists():
+            QMessageBox.warning(self, "Settings", "history_dir 경로가 존재하지 않아.")
+            return
+
+        self.accept()
+
+    def values(self):
+        return (
+            self.root_edit.text().strip(),
+            self.alarm_edit.text().strip(),
+            self.history_edit.text().strip(),
+        )
 
 
 class MenuSelectButton(QPushButton):
@@ -750,6 +847,186 @@ def scan_logs(root_dir: Path) -> pd.DataFrame:
             "time": meta.time_str,
             "dt": meta.dt,
         })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    df["date_dt"] = pd.to_datetime(df["date"], format="%Y%m%d", errors="coerce")
+    df = (
+        df.dropna(subset=["date_dt"])
+          .sort_values(["date_dt", "tube", "recipe", "job_id"])
+          .reset_index(drop=True)
+    )
+    return df
+
+
+def parse_history_log_filename(p: Path) -> tuple[str, str, str, bool] | None:
+    """
+    history_dir 구조:
+      history_dir / TUBE01 / (레시피명)_(날짜)_(시간).csv
+      history_dir / TUBE01 / (레시피명)_(날짜)_(시간)_AB.csv
+
+    return:
+      recipe_from_filename, date_str, time_str, is_abort
+    """
+    if p.suffix.lower() != ".csv":
+        return None
+
+    tube = p.parent.name.strip()
+    if not tube:
+        return None
+
+    parts = p.stem.split("_")
+    if len(parts) < 3:
+        return None
+
+    is_abort = False
+    if parts[-1].upper() == "AB":
+        is_abort = True
+        parts = parts[:-1]
+
+    if len(parts) < 3:
+        return None
+
+    date_str = parts[-2]
+    time_str = parts[-1]
+    recipe_from_filename = "_".join(parts[:-2]).strip()
+
+    if not DATE_RE8.match(date_str):
+        return None
+    if not TIME_RE4_6.match(time_str):
+        return None
+
+    return recipe_from_filename, date_str, time_str, is_abort
+
+def extract_history_meta_from_first_row(p: Path) -> dict[str, object]:
+    """
+    history log CSV 첫 행에서
+    'Job ID' ~ 'Recipe Name' 사이(양 끝 포함)의 모든 열을 추출한다.
+    """
+    try:
+        df = pd.read_csv(p, low_memory=False, nrows=1)
+        if df.empty:
+            return {}
+    except Exception:
+        return {}
+
+    df = CsvPlotPanel._normalize_columns(df)
+    cols = list(df.columns)
+
+    norm_map = {c: re.sub(r"[^a-z0-9]", "", str(c).strip().lower()) for c in cols}
+
+    job_idx = None
+    recipe_idx = None
+
+    for i, c in enumerate(cols):
+        norm = norm_map[c]
+        if job_idx is None and norm in ("jobid", "job"):
+            job_idx = i
+        if recipe_idx is None and norm in ("recipename", "recipe"):
+            recipe_idx = i
+
+    if job_idx is None or recipe_idx is None:
+        return {}
+
+    if job_idx > recipe_idx:
+        job_idx, recipe_idx = recipe_idx, job_idx
+
+    first = df.iloc[0]
+    out = {}
+
+    for c in cols[job_idx:recipe_idx + 1]:
+        v = first[c]
+        if pd.isna(v):
+            out[c] = ""
+        else:
+            out[c] = str(v).strip()
+
+    return out
+
+def scan_history_logs(
+    history_dir: Path,
+    start_date: pd.Timestamp | None = None,
+    end_date: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """
+    history_dir 하위 로그를 읽어서 raw/history DataFrame 생성.
+    - tube: 상위 폴더명
+    - recipe_from_filename: 파일명에서 파싱
+    - recipe_name: 파일 내부 첫 행의 'Recipe Name'
+    - job_id: 파일 내부 첫 행의 'Job ID'
+    - is_abort: 파일명 끝 _AB 여부
+
+    start_date / end_date 가 주어지면
+    파일명 날짜(date_str) 기준으로 해당 기간만 스캔한다.
+    """
+    rows = []
+
+    if not history_dir.exists():
+        return pd.DataFrame()
+
+    start_norm = pd.Timestamp(start_date).normalize() if start_date is not None else None
+    end_norm = pd.Timestamp(end_date).normalize() if end_date is not None else None
+
+    for p in history_dir.rglob("*.csv"):
+        parsed = parse_history_log_filename(p)
+        if parsed is None:
+            continue
+
+        recipe_from_filename, date_str, time_str, is_abort = parsed
+        tube = p.parent.name.strip()
+
+        # ---------- 날짜 범위 선필터 ----------
+        try:
+            file_date = pd.to_datetime(date_str, format="%Y%m%d", errors="coerce")
+        except Exception:
+            file_date = pd.NaT
+
+        if pd.isna(file_date):
+            continue
+
+        file_date = pd.Timestamp(file_date).normalize()
+
+        if start_norm is not None and file_date < start_norm:
+            continue
+        if end_norm is not None and file_date > end_norm:
+            continue
+        # ------------------------------------
+
+        dt = None
+        try:
+            fmt = "%Y%m%d%H%M" if len(time_str) == 4 else "%Y%m%d%H%M%S"
+            dt = pd.to_datetime(date_str + time_str, format=fmt, errors="coerce")
+            if pd.isna(dt):
+                dt = None
+        except Exception:
+            dt = None
+
+        meta_cols = extract_history_meta_from_first_row(p)
+
+        job_id = str(meta_cols.get("Job ID", meta_cols.get("JOB ID", meta_cols.get("job_id", "")))).strip()
+        recipe_name = str(
+            meta_cols.get(
+                "Recipe Name",
+                meta_cols.get("RECIPE NAME", meta_cols.get("recipe_name", recipe_from_filename))
+            )
+        ).strip() or recipe_from_filename
+
+        row = {
+            "path": str(p),
+            "tube": tube,
+            "recipe": recipe_name,
+            "recipe_from_filename": recipe_from_filename,
+            "job_id": job_id,
+            "date": date_str,
+            "time": time_str,
+            "dt": dt,
+            "is_abort": bool(is_abort),
+            "abort_flag": 1 if is_abort else 0,
+        }
+        row.update(meta_cols)
+        rows.append(row)
 
     df = pd.DataFrame(rows)
     if df.empty:
@@ -2024,11 +2301,11 @@ class HistoryChartView(QChartView):
 
 class HistoryDialog(QDialog):
     """
-    날짜별 공정 횟수 표시 (Total / By Tube / By Recipe)
-    - Hover 툴팁: 날짜, 그룹, 수량
-    - Export: 현재 원본/집계 저장(외부에서 호출)
+    날짜별 공정 횟수 표시
+    - 최초 오픈 시 최근 7일만 스캔
+    - 날짜 범위 변경 시 해당 기간만 다시 스캔
     """
-    def __init__(self, df_logs: pd.DataFrame, parent=None):
+    def __init__(self, history_dir: Path, parent=None):
         super().__init__(parent)
 
         self.setWindowFlag(Qt.Window, True)
@@ -2038,36 +2315,54 @@ class HistoryDialog(QDialog):
         self.setWindowTitle("History (Runs per day)")
         self.resize(980, 560)
 
-        self.df_logs = df_logs.copy()
+        self.history_dir = Path(history_dir)
+        self.df_logs = pd.DataFrame()
 
-        self.mode = MenuSelectButton("Mode")
-        self.mode.addItems(["Total", "By Tube", "By Recipe"])
-        self.mode.setCurrentText("Total")
-        self.mode.selectionChanged.connect(lambda _: self._rebuild_chart())
+        self.group_by = MenuSelectButton("Group")
+        self.group_by.addItem("Total")
+        self.group_by.addItem("tube")
+        self.group_by.addItem("recipe")
+        self.group_by.setCurrentText("Total")
+        self.group_by.selectionChanged.connect(lambda _: self._rebuild_chart())
 
         self.btn_export = QPushButton("Export raw data (Excel)")
         self.btn_export.setCursor(Qt.PointingHandCursor)
 
+        today = QDate.currentDate()
+        default_from = today.addDays(-6)
+
         self.date_from = QDateEdit()
         self.date_from.setCalendarPopup(True)
         self.date_from.setDisplayFormat("yyyy-MM-dd")
+        self.date_from.setDate(default_from)
 
         self.date_to = QDateEdit()
         self.date_to.setCalendarPopup(True)
         self.date_to.setDisplayFormat("yyyy-MM-dd")
+        self.date_to.setDate(today)
 
         self.btn_date_range = QPushButton("Select date range")
         self.btn_date_range.setCursor(Qt.PointingHandCursor)
         self.btn_date_range.clicked.connect(self._open_date_range_dialog)
 
+        self.sort_mode = MenuSelectButton("Sort")
+        self.sort_mode.addItems(["Date asc", "Count desc"])
+        self.sort_mode.setCurrentText("Date asc")
+        self.sort_mode.selectionChanged.connect(lambda _: self._rebuild_chart())
+
+        self.abort_only_cb = QCheckBox("Abort only")
+        self.abort_only_cb.toggled.connect(lambda _: self._rebuild_chart())
+
         if not self.df_logs.empty and "date_dt" in self.df_logs.columns:
-            dmin = pd.to_datetime(self.df_logs["date_dt"].min()).date()
             dmax = pd.to_datetime(self.df_logs["date_dt"].max()).date()
-            self.date_from.setDate(QDate(dmin.year, dmin.month, dmin.day))
-            self.date_to.setDate(QDate(dmax.year, dmax.month, dmax.day))
+            qmax = QDate(dmax.year, dmax.month, dmax.day)
+
+            self.date_to.setDate(qmax if qmax <= today else today)
+
+            dmin_limit = self.date_to.date().addDays(-6)
+            self.date_from.setDate(dmin_limit)
         else:
-            today = QDate.currentDate()
-            self.date_from.setDate(today.addMonths(-1))
+            self.date_from.setDate(default_from)
             self.date_to.setDate(today)
 
         # self.date_from.dateChanged.connect(self._rebuild_chart)
@@ -2076,13 +2371,18 @@ class HistoryDialog(QDialog):
         apply_chrome_input_styles(self)
 
         top = QHBoxLayout()
-        top.addWidget(QLabel("Color/group by:"), 0)
-        top.addWidget(self.mode, 0)
+        top.addWidget(QLabel("Group by:"), 0)
+        top.addWidget(self.group_by, 0)
         top.addSpacing(12)
         top.addWidget(QLabel("Period"), 0)
         top.addWidget(self.btn_date_range, 0)
         top.addStretch(1)
         top.addWidget(self.btn_export, 0)
+        top.addSpacing(12)
+        top.addWidget(QLabel("Sort"), 0)
+        top.addWidget(self.sort_mode, 0)
+        top.addSpacing(12)
+        top.addWidget(self.abort_only_cb, 0)
 
         self.chart = QChart()
         self.chart.legend().setVisible(True)
@@ -2094,16 +2394,141 @@ class HistoryDialog(QDialog):
         self.view.setStyleSheet("background:white; border:1px solid #dde3ec; border-radius:16px;")
         apply_shadow(self.view, blur=24, y_offset=4)
 
+        self.raw_table = QTableWidget()
+        self.raw_table.setColumnCount(0)
+        self.raw_table.setRowCount(0)
+        self.raw_table.setAlternatingRowColors(True)
+        self.raw_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.raw_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.raw_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.raw_table.setWordWrap(False)
+        self.raw_table.verticalHeader().setVisible(False)
+        self.raw_table.horizontalHeader().setStretchLastSection(False)
+        self.raw_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.raw_table.setStyleSheet("""
+        QTableWidget {
+            background: white;
+            border: 1px solid #dde3ec;
+            border-radius: 16px;
+            gridline-color: #edf1f5;
+            alternate-background-color: #f8fafc;
+        }
+        QHeaderView::section {
+            background: #f8fafc;
+            border: none;
+            border-bottom: 1px solid #e5e7eb;
+            padding: 8px;
+            font-weight: 600;
+            color: #6b7280;
+        }
+        QTableWidget::item {
+            padding: 6px;
+        }
+        QTableWidget::item:selected {
+            background: #eaf2ff;
+            color: #111827;
+        }
+        """)
+
         lay = QVBoxLayout(self)
         lay.addLayout(top)
-        lay.addWidget(self.view, 1)
+        lay.addWidget(self.view, 3)
+        lay.addWidget(self.raw_table, 2)
 
         self._series: QBarSeries | None = None
         self._axis_x: QBarCategoryAxis | None = None
         self._axis_y: QValueAxis | None = None
 
         self._refresh_date_range_button()
+        self.reload_data()
+
+    def _refresh_raw_table(self):
+        df = self.filtered_logs().copy()
+
+        if df is None or df.empty:
+            self.raw_table.clear()
+            self.raw_table.setRowCount(0)
+            self.raw_table.setColumnCount(0)
+            return
+
+        preferred_front = ["date", "time", "tube", "job_id", "recipe", "recipe_from_filename"]
+        preferred_back = ["is_abort", "abort_flag", "path", "dt", "date_dt"]
+
+        cols_front = [c for c in preferred_front if c in df.columns]
+        cols_back = [c for c in preferred_back if c in df.columns]
+        cols_mid = [c for c in df.columns if c not in cols_front + cols_back]
+
+        cols = cols_front + cols_mid + cols_back
+        df = df.loc[:, cols].copy()
+
+        df = df.fillna("")
+
+        self.raw_table.clear()
+        self.raw_table.setColumnCount(len(cols))
+        self.raw_table.setRowCount(len(df))
+        self.raw_table.setHorizontalHeaderLabels([str(c) for c in cols])
+
+        for r in range(len(df)):
+            row = df.iloc[r]
+            for c, col_name in enumerate(cols):
+                val = row[col_name]
+                text = "" if pd.isna(val) else str(val)
+                item = QTableWidgetItem(text)
+                self.raw_table.setItem(r, c, item)
+
+        self.raw_table.resizeColumnsToContents()
+
+        hdr = self.raw_table.horizontalHeader()
+        for i, col_name in enumerate(cols):
+            if col_name in ("path", "recipe_from_filename", "recipe"):
+                hdr.setSectionResizeMode(i, QHeaderView.Stretch)
+
+    def reload_data(self):
+        start, end = self._selected_date_range()
+
+        self.df_logs = scan_history_logs(
+            self.history_dir,
+            start_date=start,
+            end_date=end,
+        )
+
+        self._rebuild_group_candidates()
         self._rebuild_chart()
+        self._refresh_raw_table()
+
+    def _rebuild_group_candidates(self):
+        current = self.group_by.currentText() if hasattr(self, "group_by") else "Total"
+
+        self.group_by.blockSignals(True)
+        try:
+            self.group_by.clear()
+            self.group_by.addItem("Total")
+            self.group_by.addItem("tube")
+            self.group_by.addItem("recipe")
+
+            if not self.df_logs.empty:
+                reserved = {
+                    "path", "tube", "recipe", "recipe_from_filename", "job_id",
+                    "date", "time", "dt", "date_dt", "is_abort", "abort_flag"
+                }
+
+                extra_group_candidates = []
+                for c in self.df_logs.columns:
+                    if c in reserved:
+                        continue
+                    s = self.df_logs[c].astype(str).str.strip()
+                    if (s != "").any():
+                        extra_group_candidates.append(c)
+
+                for c in extra_group_candidates:
+                    self.group_by.addItem(c)
+
+            if current and current in self.group_by._items:
+                self.group_by.setCurrentText(current)
+            else:
+                self.group_by.setCurrentText("Total")
+        finally:
+            self.group_by.blockSignals(False)
 
     def _refresh_date_range_button(self):
         s = self.date_from.date().toString("yyyy-MM-dd")
@@ -2124,7 +2549,7 @@ class HistoryDialog(QDialog):
         self.date_from.setDate(d0)
         self.date_to.setDate(d1)
         self._refresh_date_range_button()
-        self._rebuild_chart()
+        self.reload_data()
 
     def _selected_date_range(self) -> tuple[pd.Timestamp, pd.Timestamp]:
         d0 = self.date_from.date()
@@ -2144,8 +2569,11 @@ class HistoryDialog(QDialog):
         start, end = self._selected_date_range()
         df = self.df_logs.copy()
         df = df[df["date_dt"].between(start, end, inclusive="both")].copy()
-        return df
 
+        if self.abort_only_cb.isChecked() and "is_abort" in df.columns:
+            df = df[df["is_abort"] == True].copy()
+
+        return df
     def _unique_colors(self):
         base = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
                 "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
@@ -2166,26 +2594,46 @@ class HistoryDialog(QDialog):
         df = self.filtered_logs().copy()
         if df.empty:
             return [], [], {}
+
         df["date_label"] = df["date_dt"].dt.strftime("%Y-%m-%d")
 
-        mode = self.mode.currentText()
-        if mode == "By Tube":
-            gcol = "tube"
-        elif mode == "By Recipe":
-            gcol = "recipe"
-        else:
-            gcol = None
+        mode = self.group_by.currentText()
+        self.chart.setTitle(f"Runs per day (group by: {mode})")
 
-        if gcol is None:
+        if mode == "Total":
             grp = df.groupby("date_label").size().reset_index(name="cnt")
+            if self.sort_mode.currentText() == "Count desc":
+                grp = grp.sort_values(["cnt", "date_label"], ascending=[False, True])
+
             dates = grp["date_label"].tolist()
             data = {"Total": grp["cnt"].astype(int).tolist()}
             return dates, ["Total"], data
 
+        gcol = mode
+        if gcol not in df.columns:
+            return [], [], {}
+
+        df[gcol] = df[gcol].astype(str).fillna("").str.strip()
+        df.loc[df[gcol] == "", gcol] = "(blank)"
+
         pivot = (
-            df.pivot_table(index="date_label", columns=gcol, values="path", aggfunc="count", fill_value=0)
-              .sort_index()
+            df.pivot_table(
+                index="date_label",
+                columns=gcol,
+                values="path",
+                aggfunc="count",
+                fill_value=0
+            )
+            .sort_index()
         )
+
+        if pivot.empty:
+            return [], [], {}
+
+        if self.sort_mode.currentText() == "Count desc":
+            col_order = pivot.sum(axis=0).sort_values(ascending=False).index.tolist()
+            pivot = pivot[col_order]
+
         dates = pivot.index.tolist()
         groups = list(pivot.columns.astype(str))
         data = {g: pivot[g].astype(int).tolist() for g in groups}
@@ -2204,11 +2652,13 @@ class HistoryDialog(QDialog):
             self.chart.setTitle("No logs found")
             return
 
-        mode = self.mode.currentText()
-        if mode in ("By Tube", "By Recipe"):
-            series = QStackedBarSeries()
-        else:
+        mode = self.group_by.currentText()
+
+        if mode == "Total":
             series = QBarSeries()
+        else:
+            series = QStackedBarSeries()
+
         colors = self._unique_colors()
 
         for g in groups:
@@ -2291,7 +2741,8 @@ class HistoryDialog(QDialog):
         self._axis_x = axis_x
         self._axis_y = axis_y
 
-        self.chart.setTitle(f"Runs per day ({mode})")
+        abort_tag = " | Abort only" if self.abort_only_cb.isChecked() else ""
+        self.chart.setTitle(f"Runs per day (group by: {mode}{abort_tag})")
 
 
 class CompareDialog(QDialog):
@@ -2384,12 +2835,15 @@ class CsvPlotPanel(QWidget):
     historyRequested = Signal(object)
     exportRequested = Signal(object)
 
-    def __init__(self, alarm_dir: Path, parent=None):
+    def __init__(self, alarm_dir: Path, history_dir: Path | None = None, parent=None):
         super().__init__(parent)
 
         self.root_dir: Path | None = None
+        self.history_dir: Path | None = Path(history_dir).resolve() if history_dir else None
+
         self._history_df_cache: pd.DataFrame | None = None
         self._history_cache_root: Path | None = None
+        self._history_cache_history_dir: Path | None = None
 
         self.alarm_dir = Path(alarm_dir)
 
@@ -2678,25 +3132,28 @@ class CsvPlotPanel(QWidget):
         self.compareRequested.emit(area)
 
     def _get_history_df(self, force: bool = False) -> pd.DataFrame:
-        if self.root_dir is None:
+        hd = self.history_dir
+        if hd is None:
             return pd.DataFrame()
-        rd = self.root_dir
 
-        if (not force) and self._history_df_cache is not None and self._history_cache_root == rd:
+        if (
+                (not force)
+                and self._history_df_cache is not None
+                and self._history_cache_history_dir == hd
+        ):
             return self._history_df_cache
 
-        dfh = scan_logs(rd)
+        dfh = scan_history_logs(hd)
         self._history_df_cache = dfh
-        self._history_cache_root = rd
+        self._history_cache_history_dir = hd
         return dfh
 
     def show_history_dialog(self, area: PlotArea | None = None):
-        dfh = self._get_history_df(force=True)
-        if dfh.empty:
-            QMessageBox.information(self, "History", "No valid log files found under root_dir.")
+        if self.history_dir is None or not Path(self.history_dir).exists():
+            QMessageBox.information(self, "History", "history_dir is not set or does not exist.")
             return
 
-        dlg = HistoryDialog(dfh, parent=self)
+        dlg = HistoryDialog(Path(self.history_dir), parent=self)
 
         def _export_from_dialog():
             self.export_history_to_excel(dlg.filtered_logs())
@@ -2715,7 +3172,7 @@ class CsvPlotPanel(QWidget):
         save_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Excel",
-            str((self.root_dir or Path.cwd()) / default_name),
+            str((self.history_dir or self.root_dir or Path.cwd()) / default_name),
             "Excel Files (*.xlsx)"
         )
         if not save_path:
@@ -2724,23 +3181,58 @@ class CsvPlotPanel(QWidget):
         df = dfh.copy()
         df["date_label"] = df["date_dt"].dt.strftime("%Y-%m-%d")
 
-        daily_total = df.groupby("date_label").size().reset_index(name="runs").sort_values("date_label")
+        daily_total = (
+            df.groupby("date_label")
+            .agg(
+                runs=("path", "count"),
+                abort_runs=("abort_flag", "sum"),
+            )
+            .reset_index()
+            .sort_values("date_label")
+        )
+
         daily_by_tube = (
             df.pivot_table(index="date_label", columns="tube", values="path", aggfunc="count", fill_value=0)
-              .reset_index()
+            .reset_index()
         )
+
         daily_by_recipe = (
             df.pivot_table(index="date_label", columns="recipe", values="path", aggfunc="count", fill_value=0)
-              .reset_index()
+            .reset_index()
+        )
+
+        abort_by_tube = (
+            df.pivot_table(index="date_label", columns="tube", values="abort_flag", aggfunc="sum", fill_value=0)
+            .reset_index()
+        )
+
+        abort_by_recipe = (
+            df.pivot_table(index="date_label", columns="recipe", values="abort_flag", aggfunc="sum", fill_value=0)
+            .reset_index()
         )
 
         try:
             with pd.ExcelWriter(save_path, engine="openpyxl") as w:
-                out_cols = ["path", "tube", "recipe", "job_id", "date", "time", "dt"]
+                base_front = ["path", "tube", "recipe", "recipe_from_filename"]
+                base_back = ["job_id", "date", "time", "dt", "is_abort", "abort_flag"]
+
+                meta_dynamic = [
+                    c for c in df.columns
+                    if c not in (base_front + base_back + ["date_label", "date_dt"])
+                ]
+
+                out_cols = base_front + meta_dynamic + base_back
+
+                for c in out_cols:
+                    if c not in df.columns:
+                        df[c] = ""
+
                 df[out_cols].to_excel(w, index=False, sheet_name="raw_files")
                 daily_total.to_excel(w, index=False, sheet_name="daily_total")
                 daily_by_tube.to_excel(w, index=False, sheet_name="daily_by_tube")
                 daily_by_recipe.to_excel(w, index=False, sheet_name="daily_by_recipe")
+                abort_by_tube.to_excel(w, index=False, sheet_name="abort_by_tube")
+                abort_by_recipe.to_excel(w, index=False, sheet_name="abort_by_recipe")
         except Exception as e:
             QMessageBox.critical(self, "Export failed", str(e))
             return
@@ -4057,10 +4549,11 @@ class CsvPlotPanel(QWidget):
 # MainWindow
 # =========================================================
 class MainWindow(QMainWindow):
-    def __init__(self, root_dir: str | Path, alarm_dir: str | Path):
+    def __init__(self, root_dir: str | Path, alarm_dir: str | Path, history_dir: str | Path):
         super().__init__()
         self.root_dir = Path(root_dir).resolve()
         self.alarm_dir = Path(alarm_dir).resolve()
+        self.history_dir = Path(history_dir).resolve()
         self.setWindowTitle("Log Plotter")
 
         screen = QApplication.primaryScreen()
@@ -4162,7 +4655,11 @@ class MainWindow(QMainWindow):
         left_lay.addWidget(self.tree_card, 1)
         splitter.addWidget(left_panel)
 
-        self.plot_panel = CsvPlotPanel(alarm_dir=self.alarm_dir)
+        self.plot_panel = CsvPlotPanel(
+            alarm_dir=self.alarm_dir,
+            history_dir=self.history_dir,
+        )
+        self.plot_panel.root_dir = self.root_dir
         self.plot_panel.root_dir = self.root_dir
         self.plot_panel.historyRequested.connect(self.on_history_requested)
         self.plot_panel.exportRequested.connect(self.on_export_requested)
@@ -4175,6 +4672,78 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 6)
         self.setCentralWidget(splitter)
+
+        self._install_system_menu()
+
+    def reload_tree_root(self):
+        self.model.setRootPath(str(self.root_dir))
+        src_root = self.model.index(str(self.root_dir))
+        proxy_root = self.proxy_model.mapFromSource(src_root) if hasattr(self, "proxy_model") else src_root
+
+        if hasattr(self, "proxy_model"):
+            self.tree.setModel(self.proxy_model)
+            self.tree.setRootIndex(proxy_root)
+        else:
+            self.tree.setModel(self.model)
+            self.tree.setRootIndex(src_root)
+
+        self.tree.collapseAll()
+        self.plot_panel.root_dir = self.root_dir
+        self.plot_panel.alarm_dir = self.alarm_dir
+        self.plot_panel.history_dir = self.history_dir
+
+        self.plot_panel._history_df_cache = None
+        self.plot_panel._history_cache_root = None
+        self.plot_panel._history_cache_history_dir = None
+
+    def open_settings_dialog(self):
+        dlg = AppSettingsDialog(
+            root_dir=str(self.root_dir),
+            alarm_dir=str(self.alarm_dir),
+            history_dir=str(self.history_dir),
+            parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        root_dir, alarm_dir, history_dir = dlg.values()
+
+        self.root_dir = Path(root_dir).resolve()
+        self.alarm_dir = Path(alarm_dir).resolve() if alarm_dir else Path(".").resolve()
+        self.history_dir = Path(history_dir).resolve() if history_dir else Path(".").resolve()
+
+        self.reload_tree_root()
+
+    def _install_system_menu(self):
+        if not sys.platform.startswith("win"):
+            return
+
+        self._sys_menu_cmd_settings = 0x1FF0
+
+        user32 = ctypes.windll.user32
+        hwnd = int(self.winId())
+        hmenu = user32.GetSystemMenu(hwnd, False)
+        if not hmenu:
+            return
+
+        MF_SEPARATOR = 0x00000800
+        MF_STRING = 0x00000000
+
+        user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
+        user32.AppendMenuW(hmenu, MF_STRING, self._sys_menu_cmd_settings, "Settings...")
+
+    def nativeEvent(self, eventType, message):
+        if sys.platform.startswith("win"):
+            msg = wintypes.MSG.from_address(message.__int__())
+            WM_SYSCOMMAND = 0x0112
+
+            if msg.message == WM_SYSCOMMAND:
+                cmd = int(msg.wParam) & 0xFFF0
+                if cmd == self._sys_menu_cmd_settings:
+                    self.open_settings_dialog()
+                    return True, 0
+
+        return super().nativeEvent(eventType, message)
 
     def on_tree_search_changed(self, text: str):
         self.proxy_model.setFilterText(text)
@@ -4258,10 +4827,14 @@ def main():
     # root_dir = r"C:\hmi\System\RecipeProcLog"
     alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
     # alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
+    history_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\RecipeHistoryLog"
+    # history_dir = r"C:\hmi\System\RecipeHistoryLog"
 
-    logger.info(f"[APP] paths root_dir={root_dir}, alarm_dir={alarm_dir}")
-
-    win = MainWindow(root_dir=root_dir, alarm_dir=alarm_dir)
+    win = MainWindow(
+        root_dir=root_dir,
+        alarm_dir=alarm_dir,
+        history_dir=history_dir,
+    )
     win.setWindowIcon(QIcon(icon_path))
     win.show()
 
