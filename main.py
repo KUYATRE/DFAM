@@ -10,7 +10,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtCore import (
     Qt, QDir, QDateTime, QPoint, QPointF, QRect, QRectF,
-    QMargins, QTimer, Signal, QSize, QDate, QSortFilterProxyModel
+    QMargins, QTimer, Signal, QSize, QDate, QSortFilterProxyModel,
+    QSettings
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
@@ -907,7 +908,7 @@ def extract_history_meta_from_first_row(p: Path) -> dict[str, object]:
     'Job ID' ~ 'Recipe Name' 사이(양 끝 포함)의 모든 열을 추출한다.
     """
     try:
-        df = pd.read_csv(p, low_memory=False, nrows=1)
+        df, _ = CsvPlotPanel.read_csv_with_fallback(p, nrows=1)
         if df.empty:
             return {}
     except Exception:
@@ -3440,7 +3441,7 @@ class CsvPlotPanel(QWidget):
         common: set[str] | None = None
         for p in paths:
             try:
-                df = pd.read_csv(p, low_memory=False, nrows=200)
+                df, _ = CsvPlotPanel.read_csv_with_fallback(p, nrows=200)
                 df = self._normalize_columns(df)
             except Exception:
                 continue
@@ -3522,7 +3523,7 @@ class CsvPlotPanel(QWidget):
 
         for p in paths:
             try:
-                df = pd.read_csv(p, low_memory=False)
+                df, _ = CsvPlotPanel.read_csv_with_fallback(p)
                 if df.empty:
                     continue
                 df = self._normalize_columns(df)
@@ -3767,6 +3768,32 @@ class CsvPlotPanel(QWidget):
         )
         return df
 
+    @staticmethod
+    def read_csv_with_fallback(path, **kwargs):
+        """
+        CSV를 여러 인코딩으로 순차 시도해서 읽는다.
+        return:
+            df, used_encoding
+        """
+        encodings = ["utf-8", "utf-8-sig", "cp949", "euc-kr"]
+
+        errors_log = []
+        path = Path(path)
+
+        for enc in encodings:
+            try:
+                df = pd.read_csv(path, encoding=enc, low_memory=False, **kwargs)
+                return df, enc
+            except UnicodeDecodeError as e:
+                errors_log.append(f"{enc}: UnicodeDecodeError: {e}")
+            except Exception as e:
+                errors_log.append(f"{enc}: {type(e).__name__}: {e}")
+
+        raise ValueError(
+            f"CSV encoding detection failed for file:\n{path}\n\n"
+            + "\n".join(errors_log)
+        )
+
     def _set_combos_items(self, combos, items: list[str]):
         for cb in combos:
             cb.clear()
@@ -3930,11 +3957,17 @@ class CsvPlotPanel(QWidget):
         self.title.setText(f"Selected CSV: {path.name}")
 
         try:
-            df = pd.read_csv(path, low_memory=False)
+            df, used_encoding = self.read_csv_with_fallback(path)
             if df.empty:
                 raise ValueError("CSV file is empty")
         except Exception as e:
-            QMessageBox.critical(self, "CSV file load aborted", f"{e}")
+            QMessageBox.critical(
+                self,
+                "CSV file load aborted",
+                "파일을 읽을 수 없습니다.\n\n"
+                "UTF-8, UTF-8-SIG, CP949, EUC-KR 순으로 읽기를 시도했지만 실패했습니다.\n\n"
+                f"{e}"
+            )
             return
 
         df = self._normalize_columns(df)
@@ -4670,6 +4703,9 @@ class MainWindow(QMainWindow):
         self.root_dir = Path(root_dir).resolve()
         self.alarm_dir = Path(alarm_dir).resolve()
         self.history_dir = Path(history_dir).resolve()
+
+        self._load_app_settings()
+
         self.setWindowTitle("Log Plotter")
 
         screen = QApplication.primaryScreen()
@@ -4791,6 +4827,29 @@ class MainWindow(QMainWindow):
 
         self._install_system_menu()
 
+    def _load_app_settings(self):
+        settings = QSettings("DFAM", "LogPlotter")
+
+        root_dir = settings.value("paths/root_dir", str(self.root_dir), type=str)
+        alarm_dir = settings.value("paths/alarm_dir", str(self.alarm_dir), type=str)
+        history_dir = settings.value("paths/history_dir", str(self.history_dir), type=str)
+
+        if root_dir and Path(root_dir).exists():
+            self.root_dir = Path(root_dir).resolve()
+
+        if alarm_dir and Path(alarm_dir).exists():
+            self.alarm_dir = Path(alarm_dir).resolve()
+
+        if history_dir and Path(history_dir).exists():
+            self.history_dir = Path(history_dir).resolve()
+
+    def _save_app_settings(self):
+        settings = QSettings("DFAM", "LogPlotter")
+        settings.setValue("paths/root_dir", str(self.root_dir))
+        settings.setValue("paths/alarm_dir", str(self.alarm_dir))
+        settings.setValue("paths/history_dir", str(self.history_dir))
+        settings.sync()
+
     def reload_tree_root(self):
         self.model.setRootPath(str(self.root_dir))
         src_root = self.model.index(str(self.root_dir))
@@ -4828,6 +4887,7 @@ class MainWindow(QMainWindow):
         self.alarm_dir = Path(alarm_dir).resolve() if alarm_dir else Path(".").resolve()
         self.history_dir = Path(history_dir).resolve() if history_dir else Path(".").resolve()
 
+        self._save_app_settings()
         self.reload_tree_root()
 
     def _install_system_menu(self):

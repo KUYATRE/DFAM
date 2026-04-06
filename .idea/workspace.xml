@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="225c8168-e893-4b53-808a-a9f4aedbaaf5" name="변경" comment="History view update">
+    <list default="true" id="225c8168-e893-4b53-808a-a9f4aedbaaf5" name="변경" comment="History view update(Pie chart added)">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
@@ -142,7 +142,18 @@
       <workItem from="1773338044267" duration="3573000" />
       <workItem from="1773407383910" duration="5335000" />
       <workItem from="1773666288017" duration="4227000" />
-      <workItem from="1773670855486" duration="4459000" />
+      <workItem from="1773670855486" duration="7685000" />
+      <workItem from="1773749717973" duration="927000" />
+      <workItem from="1773856107056" duration="559000" />
+      <workItem from="1773864131097" duration="623000" />
+      <workItem from="1773923321921" duration="2841000" />
+      <workItem from="1774011382441" duration="2083000" />
+      <workItem from="1774046679016" duration="615000" />
+      <workItem from="1774360056655" duration="4295000" />
+      <workItem from="1774406360804" duration="725000" />
+      <workItem from="1774409020864" duration="507000" />
+      <workItem from="1775089063765" duration="861000" />
+      <workItem from="1775433732096" duration="2423000" />
     </task>
     <task id="LOCAL-00001" summary="New Project">
       <option name="closed" value="true" />
@@ -368,7 +379,15 @@
       <option name="project" value="LOCAL" />
       <updated>1773670883462</updated>
     </task>
-    <option name="localTasksCounter" value="29" />
+    <task id="LOCAL-00029" summary="History view update(Pie chart added)">
+      <option name="closed" value="true" />
+      <created>1773686360698</created>
+      <option name="number" value="00029" />
+      <option name="presentableId" value="LOCAL-00029" />
+      <option name="project" value="LOCAL" />
+      <updated>1773686360698</updated>
+    </task>
+    <option name="localTasksCounter" value="30" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -404,10 +423,11 @@
     <MESSAGE value="Compact design for each plot area" />
     <MESSAGE value="UI update(modern style)" />
     <MESSAGE value="History view update" />
-    <option name="LAST_COMMIT_MESSAGE" value="History view update" />
+    <MESSAGE value="History view update(Pie chart added)" />
+    <option name="LAST_COMMIT_MESSAGE" value="History view update(Pie chart added)" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/DFAM$logger.coverage" NAME="logger 커버리지 결과" MODIFIED="1766695351526" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/utils" />
-    <SUITE FILE_PATH="coverage/DFAM$main.coverage" NAME="main 커버리지 결과" MODIFIED="1773685888304" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/DFAM$main.coverage" NAME="main 커버리지 결과" MODIFIED="1775435832046" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
 </project>
