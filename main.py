@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 
 import pandas as pd
-from ui_theme import apply_chrome_input_styles, apply_shadow, draw_chevron
+from ui_theme import apply_chrome_input_styles, apply_shadow
 from step_statistics import calculate_step_statistics, StepStatisticsDialog
 from reference_comparison import ReferenceComparisonDialog
 from gas_usage_dialog import GasUsageDialog
@@ -35,6 +35,15 @@ from PySide6.QtCharts import (
     QBarSeries, QStackedBarSeries, QBarSet, QBarCategoryAxis,
     QPieSeries
 )
+
+from qfluentwidgets import (FluentWindow, FluentIcon as FIF, NavigationItemPosition,
+    PushButton as QPushButton, PrimaryPushButton, LineEdit as QLineEdit,
+    CheckBox as QCheckBox, TableWidget as QTableWidget, TreeView as QTreeView,
+    ListWidget as QListWidget, DateTimeEdit as QDateTimeEdit, DoubleSpinBox as QDoubleSpinBox,
+    TitleLabel, CaptionLabel, CardWidget, TransparentToolButton, DropDownToolButton, RoundMenu)
+from fluent_ui import FluentLineEdit as QLineEdit
+from fluent_ui import (FluentComboBox as QComboBox, FluentDateEdit as QDateEdit,
+    APP_VERSION, configure_fluent, app_stylesheet, SettingsPage)
 
 import ctypes
 from ctypes import wintypes
@@ -125,8 +134,8 @@ class AppSettingsDialog(QDialog):
     def __init__(self, root_dir: str = "", alarm_dir: str = "", history_dir: str = "", parent=None,
                  *, proc_log_dir: str = DEFAULT_PROC_LOG_DIR):
         super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.resize(820, 300)
+        self.setWindowTitle("로그 경로 설정")
+        self.resize(860, 380)
 
         self.root_edit = QLineEdit(root_dir)
         self.alarm_edit = QLineEdit(alarm_dir)
@@ -172,6 +181,9 @@ class AppSettingsDialog(QDialog):
         btns.rejected.connect(self.reject)
 
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(16)
+        lay.addWidget(TitleLabel("로그 경로 설정", self))
         lay.addLayout(form)
         lay.addWidget(btns)
 
@@ -222,396 +234,23 @@ class AppSettingsDialog(QDialog):
         )
 
 
-class MenuSelectButton(QPushButton):
+class MenuSelectButton(QComboBox):
     selectionChanged = Signal(str)
 
     def __init__(self, placeholder="Select", parent=None):
         super().__init__(parent)
-        self._items: list[str] = []
-        self._current_text: str = ""
-        self._placeholder = placeholder
+        self.setPlaceholderText(placeholder)
+        self.setMinimumWidth(120)
+        self.currentTextChanged.connect(self.selectionChanged.emit)
 
-        self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(34)
+    @property
+    def _items(self):
+        return [self.itemText(i) for i in range(self.count())]
 
-        # 버튼 기본 폭
-        self.setMinimumWidth(140)
-
-        self.setStyleSheet("""
-        QPushButton {
-            background: white;
-            color: #1f2937;
-            border: 1px solid #d9dee7;
-            border-radius: 10px;
-            padding: 6px 34px 6px 14px;
-            text-align: center;
-        }
-        QPushButton:hover {
-            background: #f8fafc;
-            border: 1px solid #cfd6e2;
-        }
-        QPushButton:focus {
-            border: 1px solid #60a5fa;
-        }
-        QPushButton::menu-indicator {
-            image: none;
-            width: 0px;
-            height: 0px;
-        }
-        """)
-
-        self._menu = QMenu(self)
-        self._menu.setAttribute(Qt.WA_TranslucentBackground)
-        self._menu.setStyleSheet("""
-        QMenu {
-            background: white;
-            color: #1f2937;
-            border: 1px solid #d9dee7;
-            border-radius: 4px;
-            padding: 6px;
-        }
-        QMenu::item {
-            padding: 10px 16px;
-            border-radius: 10px;
-        }
-        QMenu::item:selected {
-            background: #eef4ff;
-        }
-        """)
-        self.setMenu(self._menu)
-        self._refresh_text()
-
-    def showMenu(self):
-        self._menu.setFixedWidth(self.width() + 8)
-        pos = self.mapToGlobal(self.rect().bottomLeft())
-        pos.setY(pos.y() + 2)
-        self._menu.popup(pos)
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-
-    def paintEvent(self, e):
-        super().paintEvent(e)
-        draw_chevron(self)
-
-    def clear(self):
-        self._items.clear()
-        self._menu.clear()
-        self._current_text = ""
-        self._refresh_text()
-
-    def addItems(self, items: list[str]):
-        for t in items:
-            self.addItem(t)
-
-    def addItem(self, text: str):
-        txt = str(text)
-        self._items.append(txt)
-        act = QAction(txt, self._menu)
-        act.triggered.connect(lambda checked=False, v=txt: self.setCurrentText(v))
-        self._menu.addAction(act)
-
-        if not self._current_text:
-            self._current_text = txt
-            self._refresh_text()
-
-    def currentText(self) -> str:
-        return self._current_text
-
-    def setCurrentText(self, text: str):
-        txt = str(text)
-        if txt not in self._items and txt != "":
-            return
-        changed = (self._current_text != txt)
-        self._current_text = txt
-        self._refresh_text()
-        if changed:
-            self.selectionChanged.emit(self._current_text)
-
-    def setPlaceholderText(self, text: str):
-        self._placeholder = str(text)
-        self._refresh_text()
-
-    def _refresh_text(self):
-        self.setText(self._current_text if self._current_text else self._placeholder)
-
-
-class ChromeProxyStyle(QProxyStyle):
-    """
-    ComboBox / DateEdit / DateTimeEdit / DoubleSpinBox 의
-    화살표를 크롬 느낌의 chevron 으로 직접 그린다.
-    앱 전체에 한 번만 적용해서 사용한다.
-    """
-
-    def __init__(self):
-        super().__init__()
-
-    def drawPrimitive(self, element, option, painter, widget=None):
-        spin_up = getattr(QStyle, "PE_IndicatorSpinUp", None)
-        spin_down = getattr(QStyle, "PE_IndicatorSpinDown", None)
-
-        arrow_elements = {
-            QStyle.PE_IndicatorArrowDown,
-            QStyle.PE_IndicatorArrowUp,
-            QStyle.PE_IndicatorArrowLeft,
-            QStyle.PE_IndicatorArrowRight,
-        }
-        if spin_up is not None:
-            arrow_elements.add(spin_up)
-        if spin_down is not None:
-            arrow_elements.add(spin_down)
-
-        if element in arrow_elements:
-            painter.save()
-            painter.setRenderHint(QPainter.Antialiasing, True)
-
-            r = option.rect.adjusted(2, 2, -2, -2)
-
-            color = QColor("#4b5563")
-            if option.state & QStyle.State_MouseOver:
-                color = QColor("#374151")
-            if option.state & QStyle.State_Sunken:
-                color = QColor("#111827")
-            if not (option.state & QStyle.State_Enabled):
-                color = QColor("#9ca3af")
-
-            pen = QPen(color, 1.8)
-            pen.setCapStyle(Qt.RoundCap)
-            pen.setJoinStyle(Qt.RoundJoin)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-
-            cx = r.center().x()
-            cy = r.center().y()
-
-            w = max(6, min(10, r.width() - 4))
-            h = max(4, min(7, r.height() - 4))
-
-            path = QPainterPath()
-
-            if element in (QStyle.PE_IndicatorArrowDown, spin_down):
-                path.moveTo(cx - w / 2, cy - h / 3)
-                path.lineTo(cx, cy + h / 2)
-                path.lineTo(cx + w / 2, cy - h / 3)
-
-            elif element in (QStyle.PE_IndicatorArrowUp, spin_up):
-                path.moveTo(cx - w / 2, cy + h / 3)
-                path.lineTo(cx, cy - h / 2)
-                path.lineTo(cx + w / 2, cy + h / 3)
-
-            elif element == QStyle.PE_IndicatorArrowLeft:
-                path.moveTo(cx + w / 3, cy - h / 2)
-                path.lineTo(cx - w / 2, cy)
-                path.lineTo(cx + w / 3, cy + h / 2)
-
-            elif element == QStyle.PE_IndicatorArrowRight:
-                path.moveTo(cx - w / 3, cy - h / 2)
-                path.lineTo(cx + w / 2, cy)
-                path.lineTo(cx - w / 3, cy + h / 2)
-
-            painter.drawPath(path)
-            painter.restore()
-            return
-
-        super().drawPrimitive(element, option, painter, widget)
 
 def build_app_stylesheet() -> str:
-    return """
-    QWidget {
-        background: #f5f6f8;
-        color: #1f2937;
-        font-size: 12px;
-    }
+    return app_stylesheet()
 
-    QMainWindow, QSplitter, QStackedWidget {
-        background: #f5f6f8;
-    }
-
-    QLabel {
-        background: transparent;
-        color: #1f2937;
-    }
-
-    QLineEdit, QComboBox, QDateTimeEdit, QDateEdit, QDoubleSpinBox, QListWidget {
-        background: white;
-        color: #1f2937;
-        border: 1px solid #d9dee7;
-        border-radius: 10px;
-        padding: 6px 8px;
-        selection-background-color: #dbeafe;
-    }
-
-    QLineEdit:focus, QComboBox:focus, QDateTimeEdit:focus, QDateEdit:focus, QDoubleSpinBox:focus, QListWidget:focus {
-        border: 1px solid #60a5fa;
-    }
-
-    QPushButton {
-        background: white;
-        color: #1f2937;
-        border: 1px solid #d9dee7;
-        border-radius: 10px;
-        padding: 7px 12px;
-        font-weight: 600;
-    }
-
-    QPushButton:hover {
-        background: #f8fafc;
-    }
-
-    QPushButton:pressed {
-        background: #eef2f7;
-    }
-
-    QPushButton:disabled {
-        background: #f3f4f6;
-        color: #9ca3af;
-        border: 1px solid #e5e7eb;
-    }
-
-    QTreeView {
-        background: white;
-        color: #1f2937;
-        border: 1px solid #d9dee7;
-        border-radius: 14px;
-        alternate-background-color: #f8fafc;
-        padding: 4px;
-    }
-
-    QTreeView::item {
-        padding: 6px 4px;
-    }
-
-    QTreeView::item:selected {
-        background: #eaf2ff;
-        color: #111827;
-    }
-
-    QHeaderView::section {
-        background: #f8fafc;
-        border: none;
-        border-bottom: 1px solid #e5e7eb;
-        padding: 8px;
-        font-weight: 600;
-        color: #6b7280;
-    }
-
-    QMenu {
-        background: white;
-        color: #1f2937;
-        border: 1px solid #d9dee7;
-        border-radius: 12px;
-        padding: 6px;
-    }
-
-    QMenu::item {
-        padding: 8px 14px;
-        border-radius: 8px;
-    }
-
-    QMenu::item:selected {
-        background: #eef4ff;
-    }
-
-    QDialog {
-        background: #f8fafc;
-        color: #1f2937;
-    }
-
-    QDialog QLabel {
-        background: transparent;
-        color: #1f2937;
-    }
-
-    QDialog QCheckBox {
-        background: transparent;
-        color: #1f2937;
-    }
-
-    QDialog QComboBox,
-    QDialog QLineEdit,
-    QDialog QDateTimeEdit,
-    QDialog QDateEdit,
-    QDialog QDoubleSpinBox,
-    QDialog QListWidget {
-        background: white;
-        color: #1f2937;
-        border: 1px solid #d9dee7;
-        border-radius: 10px;
-        padding: 6px 8px;
-    }
-
-    QDialogButtonBox QPushButton {
-        min-width: 88px;
-    }
-
-    /* ----------------------------- */
-    /* Chrome-like ScrollBar */
-    /* ----------------------------- */
-
-    QScrollBar:vertical {
-        background: transparent;
-        width: 12px;
-        margin: 4px 2px 4px 2px;
-    }
-
-    QScrollBar::handle:vertical {
-        background: rgba(120, 130, 145, 0.55);
-        min-height: 28px;
-        border-radius: 6px;
-    }
-
-    QScrollBar::handle:vertical:hover {
-        background: rgba(95, 105, 120, 0.78);
-    }
-
-    QScrollBar::handle:vertical:pressed {
-        background: rgba(70, 80, 95, 0.88);
-    }
-
-    QScrollBar::add-line:vertical,
-    QScrollBar::sub-line:vertical {
-        height: 0px;
-        background: transparent;
-        border: none;
-    }
-
-    QScrollBar::add-page:vertical,
-    QScrollBar::sub-page:vertical {
-        background: transparent;
-    }
-
-    QScrollBar:horizontal {
-        background: transparent;
-        height: 12px;
-        margin: 2px 4px 2px 4px;
-    }
-
-    QScrollBar::handle:horizontal {
-        background: rgba(120, 130, 145, 0.55);
-        min-width: 28px;
-        border-radius: 6px;
-    }
-
-    QScrollBar::handle:horizontal:hover {
-        background: rgba(95, 105, 120, 0.78);
-    }
-
-    QScrollBar::handle:horizontal:pressed {
-        background: rgba(70, 80, 95, 0.88);
-    }
-
-    QScrollBar::add-line:horizontal,
-    QScrollBar::sub-line:horizontal {
-        width: 0px;
-        background: transparent;
-        border: none;
-    }
-
-    QScrollBar::add-page:horizontal,
-    QScrollBar::sub-page:horizontal {
-        background: transparent;
-    }
-    """
 
 def parse_log_filename(p: Path) -> LogMeta | None:
     """
@@ -1706,19 +1345,12 @@ class PlotArea:
         }
         """)
 
-        self.widget = QWidget()
+        self.widget = CardWidget()
+        self.widget.setBorderRadius(8)
         self.widget.setObjectName("plotCard")
         self.widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.widget.setMinimumSize(0, 0)
-        self.widget.setStyleSheet("""
-        QWidget#plotCard {
-            background: white;
-            border: 1px solid #dde3ec;
-            border-radius: 18px;
-        }
-        """)
-
-        apply_shadow(self.widget, blur=28, y_offset=5)
+        apply_shadow(self.widget, blur=14, y_offset=2)
 
         container_lay = QVBoxLayout(self.container)
         container_lay.setContentsMargins(14, 14, 14, 14)  # <- shadow 여유 공간
@@ -1733,65 +1365,17 @@ class PlotArea:
         topbar.setContentsMargins(10, 8, 10, 6)
         topbar.setSpacing(8)
 
-        self.btn_delete = QPushButton("✕")
+        self.btn_delete = TransparentToolButton(FIF.CLOSE)
         self.btn_delete.setToolTip("Delete this graph")
         self.btn_delete.setFixedSize(35, 30)
         self.btn_delete.setCursor(Qt.PointingHandCursor)
-        self.btn_delete.setStyleSheet(
-            "QPushButton{"
-            "background:white;"
-            "border:1px solid #d9dee7;"
-            "border-radius:10px;"
-            "font-weight:700;"
-            "color:#374151;"
-            "}"
-            "QPushButton:hover{background:#f8fafc;}"
-            "QPushButton:pressed{background:#eef2f7;}"
-        )
         self.btn_delete.clicked.connect(lambda: self.parent_panel.delete_graph(self))
 
-        self.btn_menu = QPushButton("⋯")
+        self.btn_menu = DropDownToolButton(FIF.MORE)
         self.btn_menu.setToolTip("Graph menu")
         self.btn_menu.setFixedSize(35, 30)
         self.btn_menu.setCursor(Qt.PointingHandCursor)
-        self.btn_menu.setStyleSheet(
-            "QPushButton{"
-            "background:white;"
-            "border:1px solid #d9dee7;"
-            "border-radius:10px;"
-            "font-size:18px;"
-            "font-weight:700;"
-            "color:#111827;"
-            "padding-bottom:2px;"
-            "}"
-            "QPushButton:hover{background:#f8fafc;}"
-            "QPushButton:pressed{background:#eef2f7;}"
-            "QPushButton::menu-indicator{image:none;width:0px;}"
-        )
-
-        self.menu = QMenu(self.btn_menu)
-        self.menu.setStyleSheet("""
-        QMenu {
-            background: white;
-            border: 1px solid #d9dee7;
-            border-radius: 2px;
-            padding: 6px;
-        }
-        QMenu::item {
-            padding: 8px 14px;
-            border-radius: 8px;
-            color: #111827;
-        }
-        QMenu::item:selected {
-            background: #eef4ff;
-        }
-        QMenu::separator {
-            height: 1px;
-            background: #e5e7eb;
-            margin: 6px 8px;
-        }
-        """)
-
+        self.menu = RoundMenu(parent=self.btn_menu)
         self.act_left_cols = QAction("Main Y components", self.menu)
         self.act_right_cols = QAction("Sub Y components", self.menu)
         self.act_compare = QAction("Compare", self.menu)
@@ -2235,31 +1819,6 @@ class HistoryDialog(QDialog):
         self.raw_table.verticalHeader().setVisible(False)
         self.raw_table.horizontalHeader().setStretchLastSection(False)
         self.raw_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.raw_table.setStyleSheet("""
-        QTableWidget {
-            background: white;
-            border: 1px solid #dde3ec;
-            border-radius: 16px;
-            gridline-color: #edf1f5;
-            alternate-background-color: #f8fafc;
-        }
-        QHeaderView::section {
-            background: #f8fafc;
-            border: none;
-            border-bottom: 1px solid #e5e7eb;
-            padding: 8px;
-            font-weight: 600;
-            color: #6b7280;
-        }
-        QTableWidget::item {
-            padding: 6px;
-        }
-        QTableWidget::item:selected {
-            background: #eaf2ff;
-            color: #111827;
-        }
-        """)
-
         charts_row = QHBoxLayout()
         charts_row.setContentsMargins(0, 0, 0, 0)
         charts_row.setSpacing(12)
@@ -2835,7 +2394,7 @@ class CsvPlotPanel(QWidget):
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 10, 10, 0)
+        root.setContentsMargins(8, 0, 0, 0)
         root.setSpacing(0)
 
         toolbar_btn_css = (
@@ -2868,9 +2427,11 @@ class CsvPlotPanel(QWidget):
         title_row.setContentsMargins(10, 2, 2, 6)
         title_row.setSpacing(8)
 
-        self.title = QLabel("Choose CSV File to Plot")
-        self.title.setStyleSheet("font-weight:700; font-size:14px; color:#111827;")
-        title_row.addWidget(self.title, 1)
+        self.title = QLabel("왼쪽에서 CSV 로그를 선택하세요")
+        self.title.setWordWrap(True)
+        self.title.setStyleSheet("font-weight:600; font-size:14px; color:#202020; padding:4px;")
+        root.addWidget(self.title)
+        title_row.addStretch()
 
         self.btn_compare = QPushButton("Compare various logs")
         self.btn_compare.setEnabled(True)
@@ -2891,14 +2452,14 @@ class CsvPlotPanel(QWidget):
         self.btn_gas_usage.setStyleSheet(toolbar_btn_css)
         title_row.addWidget(self.btn_gas_usage, 0)
 
-        self.btn_step_stats = QPushButton("Step Statistics")
+        self.btn_step_stats = QPushButton("Step 통계")
         self.btn_step_stats.setEnabled(False)
         self.btn_step_stats.setToolTip("Show step durations and sensor statistics for the loaded CSV")
         self.btn_step_stats.clicked.connect(self.show_step_statistics)
         self.btn_step_stats.setStyleSheet(toolbar_btn_css)
         title_row.addWidget(self.btn_step_stats, 0)
 
-        self.btn_reset_zoom = QPushButton("Reset Zoom")
+        self.btn_reset_zoom = QPushButton("확대 초기화")
         self.btn_reset_zoom.setEnabled(False)
         self.btn_reset_zoom.setToolTip("Reset Zoom (X Axis) to full scale")
         self.btn_reset_zoom.clicked.connect(self.reset_zoom)
@@ -2906,7 +2467,7 @@ class CsvPlotPanel(QWidget):
         apply_shadow(self.btn_reset_zoom, blur=18, y_offset=3)
         title_row.addWidget(self.btn_reset_zoom, 0)
 
-        self.btn_add_graph = QPushButton("+ Graph")
+        self.btn_add_graph = PrimaryPushButton(FIF.ADD, "그래프 추가")
         self.btn_add_graph.setEnabled(False)
         self.btn_add_graph.setToolTip("Add one more graph")
         self.btn_add_graph.clicked.connect(self.add_graph)
@@ -2934,7 +2495,7 @@ class CsvPlotPanel(QWidget):
         self.btn_clear_left.clicked.connect(self.clear_left)
         top.addWidget(self.btn_clear_left)
 
-        self.plot_btn = QPushButton("Plot")
+        self.plot_btn = PrimaryPushButton("그래프 표시")
         self.plot_btn.setEnabled(False)
         self.plot_btn.clicked.connect(self.plot)
         top.addWidget(self.plot_btn)
@@ -3090,6 +2651,7 @@ class CsvPlotPanel(QWidget):
         self._rebuild_plot_layout(force=True)
 
         self.status = QLabel("")
+        self.status.setWordWrap(True)
         self.status.setStyleSheet("color:#6b7280; padding:4px 2px 2px 2px;")
         root.addWidget(self.status)
 
@@ -4596,7 +4158,7 @@ class CsvPlotPanel(QWidget):
 # =========================================================
 # MainWindow
 # =========================================================
-class MainWindow(QMainWindow):
+class MainWindow(FluentWindow):
     def __init__(self, root_dir: str | Path, alarm_dir: str | Path, history_dir: str | Path,
                  proc_log_dir: str | Path = DEFAULT_PROC_LOG_DIR):
         super().__init__()
@@ -4607,7 +4169,7 @@ class MainWindow(QMainWindow):
 
         self._load_app_settings()
 
-        self.setWindowTitle("Log Plotter v3.07")
+        self.setWindowTitle(f"Log Plotter {APP_VERSION}")
 
         screen = QApplication.primaryScreen()
         geo = screen.availableGeometry()
@@ -4632,7 +4194,7 @@ class MainWindow(QMainWindow):
         self.proxy_model.setSourceModel(self.model)
 
         self.tree_search = QLineEdit()
-        self.tree_search.setPlaceholderText("Search files/folders...")
+        self.tree_search.setPlaceholderText("파일 / 폴더 검색")
         self.tree_search.setClearButtonEnabled(True)
         self.tree_search.textChanged.connect(self.on_tree_search_changed)
         self.tree_search.setStyleSheet(
@@ -4679,7 +4241,7 @@ class MainWindow(QMainWindow):
         self.tree.setSortingEnabled(True)
         self.tree.sortByColumn(3, Qt.AscendingOrder)
         self.tree.doubleClicked.connect(self.on_tree_double_clicked)
-        self.tree.setMinimumWidth(260)
+        self.tree.setMinimumWidth(210)
         self.tree.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         left_panel = QWidget()
@@ -4688,16 +4250,10 @@ class MainWindow(QMainWindow):
         left_lay.setContentsMargins(6, 6, 6, 6)
         left_lay.setSpacing(0)
 
-        self.tree_card = QWidget()
+        self.tree_card = CardWidget()
+        self.tree_card.setBorderRadius(8)
         self.tree_card.setObjectName("treeCard")
-        self.tree_card.setStyleSheet("""
-        QWidget#treeCard {
-            background: white;
-            border: 1px solid #d9dee7;
-            border-radius: 18px;
-        }
-        """)
-        apply_shadow(self.tree_card, blur=26, y_offset=4)
+        apply_shadow(self.tree_card, blur=14, y_offset=2)
 
         tree_card_lay = QVBoxLayout(self.tree_card)
         tree_card_lay.setContentsMargins(10, 10, 10, 10)
@@ -4722,11 +4278,43 @@ class MainWindow(QMainWindow):
         self.plot_panel.compareRequested.connect(self.on_compare_requested)
         splitter.addWidget(self.plot_panel)
 
-        splitter.setStretchFactor(0, 2)
+        splitter.setSizes([260, 900])
+        splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 6)
-        self.setCentralWidget(splitter)
+        self.workspace = QWidget()
+        self.workspace.setObjectName("logWorkspace")
+        page_layout = QVBoxLayout(self.workspace)
+        page_layout.setContentsMargins(20, 20, 20, 12)
+        page_layout.setSpacing(12)
+        heading = QHBoxLayout()
+        heading.addWidget(TitleLabel("공정 로그", self.workspace))
+        heading.addStretch()
+        heading.addWidget(CaptionLabel("PROCESS ANALYTICS", self.workspace))
+        page_layout.addLayout(heading)
+        page_layout.addWidget(splitter, 1)
+        self.addSubInterface(self.workspace, FIF.DOCUMENT, "공정 로그")
 
-        self._install_system_menu()
+        self.gas_page = GasUsageDialog(self.proc_log_dir, self, embedded=True)
+        self.gas_page.setObjectName("gasUsageDialog")
+        self.addSubInterface(self.gas_page, FIF.IOT, "가스 사용량")
+        self.settings_page = SettingsPage(self.open_settings_dialog, self)
+        self.settings_page.refresh_paths(self)
+        self.addSubInterface(self.settings_page, FIF.SETTING, "설정", NavigationItemPosition.BOTTOM)
+        self.navigationInterface.addItem("history", FIF.HISTORY, "공정 이력",
+                                         onClick=self.plot_panel.show_history_dialog, selectable=False)
+        self.setMinimumSize(1000, 680)
+        self.navigationInterface.setMinimumExpandWidth(850)
+        self.navigationInterface.setExpandWidth(188)
+        self.navigationInterface.setReturnButtonVisible(False)
+        self.navigationInterface.expand(useAni=False)
+        self.plot_panel.btn_gas_usage.clicked.disconnect()
+        self.plot_panel.btn_gas_usage.clicked.connect(lambda: self.switchTo(self.gas_page))
+        self.plot_panel.btn_gas_usage.hide()
+        self.plot_panel.btn_history.hide()
+        if QApplication.platformName() == "offscreen":
+            self.setMicaEffectEnabled(False)
+        apply_chrome_input_styles(self)
+
 
     def _load_app_settings(self):
         settings = QSettings("DFAM", "LogPlotter")
@@ -4776,11 +4364,17 @@ class MainWindow(QMainWindow):
         self.plot_panel.history_dir = self.history_dir
         self.plot_panel.proc_log_dir = self.proc_log_dir
 
+        if hasattr(self, "gas_page"):
+            self.gas_page.root_edit.setText(str(self.proc_log_dir))
+            self.settings_page.refresh_paths(self)
         self.plot_panel._history_df_cache = None
         self.plot_panel._history_cache_root = None
         self.plot_panel._history_cache_history_dir = None
 
     def open_settings_dialog(self):
+        if self.gas_page.worker is not None:
+            QMessageBox.information(self, "집계 진행 중", "가스 집계를 완료하거나 취소한 뒤 로그 경로를 변경하세요.")
+            return
         dlg = AppSettingsDialog(
             root_dir=str(self.root_dir),
             alarm_dir=str(self.alarm_dir),
@@ -4802,35 +4396,16 @@ class MainWindow(QMainWindow):
         self.reload_tree_root()
 
     def _install_system_menu(self):
-        if not sys.platform.startswith("win"):
+        # Settings now has a permanent navigation entry.
+        pass
+
+    def closeEvent(self, event):
+        if hasattr(self, "gas_page") and self.gas_page.worker is not None:
+            self.gas_page.cancel_calculation()
+            event.ignore()
+            QTimer.singleShot(100, self.close)
             return
-
-        self._sys_menu_cmd_settings = 0x1FF0
-
-        user32 = ctypes.windll.user32
-        hwnd = int(self.winId())
-        hmenu = user32.GetSystemMenu(hwnd, False)
-        if not hmenu:
-            return
-
-        MF_SEPARATOR = 0x00000800
-        MF_STRING = 0x00000000
-
-        user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(hmenu, MF_STRING, self._sys_menu_cmd_settings, "Settings...")
-
-    def nativeEvent(self, eventType, message):
-        if sys.platform.startswith("win"):
-            msg = wintypes.MSG.from_address(message.__int__())
-            WM_SYSCOMMAND = 0x0112
-
-            if msg.message == WM_SYSCOMMAND:
-                cmd = int(msg.wParam) & 0xFFF0
-                if cmd == self._sys_menu_cmd_settings:
-                    self.open_settings_dialog()
-                    return True, 0
-
-        return super().nativeEvent(eventType, message)
+        super().closeEvent(event)
 
     def on_tree_search_changed(self, text: str):
         self.proxy_model.setFilterText(text)
@@ -4905,8 +4480,7 @@ def main():
     icon_path = resource_path("icons/LP_icon_big.ico")
 
     app = QApplication(sys.argv)
-    QApplication.setStyle("Fusion")
-    app.setStyle(ChromeProxyStyle())
+    configure_fluent(app)
     app.setWindowIcon(QIcon(icon_path))
     app.setStyleSheet(build_app_stylesheet())
 

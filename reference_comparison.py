@@ -12,6 +12,10 @@ from PySide6.QtWidgets import (
 )
 
 from step_statistics import StepStatistics, StepStatisticsDialog, export_statistics_tables
+from qfluentwidgets import PushButton as QPushButton, LineEdit as QLineEdit, TableWidget as QTableWidget
+from fluent_ui import FluentLineEdit as QLineEdit
+from fluent_ui import FluentComboBox as QComboBox
+
 
 
 STEP_COLUMNS = ["Pair", "Step", "Occurrence", "Match", "Reference (s)", "Target (s)",

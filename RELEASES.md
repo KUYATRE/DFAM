@@ -1,7 +1,8 @@
 # DFAM / LogPlotter 버전 관리
 
 완성된 버전마다 소스 커밋과 annotated tag를 GitHub에 함께 올린다.
-현재 작업 브랜치는 `experiment/update_beta_v0.0.1`이다.
+현재 UI 작업 브랜치는 `feature/windows11-fluent-ui`이다.
+v3.07에서 분기했으며, 기존 `experiment/update_beta_v0.0.1` 브랜치는 유지한다.
 버전 태그를 기준으로 소스와 빌드 설정을 다시 가져올 수 있다.
 
 ## 개발 환경
@@ -33,12 +34,12 @@ python -m venv .venv
 5. 같은 버전의 annotated tag를 만든 뒤 브랜치와 태그를 함께 푸시한다.
 6. 원격 브랜치와 태그가 해당 커밋을 가리키는지 확인한다.
 
-예를 들어 다음 버전이 v3.08이면, 파일을 검토하고 스테이징한 뒤 다음과 같이 기록한다.
+예를 들어 다음 버전이 v3.09이면, 파일을 검토하고 스테이징한 뒤 다음과 같이 기록한다.
 
 ```powershell
-git commit -m "Release v3.08: describe the change"
-git tag -a v3.08 -m "LogPlotter v3.08"
-git push --atomic origin HEAD refs/tags/v3.08
+git commit -m "Release v3.09: describe the change"
+git tag -a v3.09 -m "LogPlotter v3.09"
+git push --atomic origin HEAD refs/tags/v3.09
 ```
 
 이미 공개한 태그는 수정하지 않고 새 버전으로 기록한다.
@@ -54,6 +55,29 @@ git worktree add --detach ../DFAM-v2.17 v2.17
 ```
 
 ## 변경 이력
+
+### v3.08 — 2026-11-17
+
+- `feature/windows11-fluent-ui` 브랜치에서 Windows 11 스타일 UI를 개편한다.
+  공식 PySide6-Fluent-Widgets 1.11.3과 PySideSix-Frameless-Window 0.8.2를 사용하고 의존성을 고정한다.
+  `FluentWindow` 제목 표시줄·탐색 메뉴·Windows 11 Mica 배경, 밝은 테마와 파란 강조색을 적용한다.
+  Mica는 라이브러리가 지원하는 Windows 11에서 사용하며 offscreen 검증에서는 끈다.
+- 왼쪽 메뉴에 공정 로그, 가스 사용량, 공정 이력, 설정 진입점을 제공한다.
+  가스 화면을 메인 창에 포함하여 화면을 이동해도 선택 로그, 그래프 및 집계 결과를 유지한다.
+  설정 화면에서 공정·가스·알람·이력 경로를 카드로 확인하고 기존 경로 설정 창에서 수정한다.
+- 버튼, 체크박스, 입력창, 드롭다운, 달력, 표, 파일 트리, 스크롤을 Fluent 구성 요소로 교체한다.
+  가스 탭은 SegmentedWidget으로 전환하고 그래프 메뉴는 RoundMenu를 사용한다.
+  카드 모서리와 그림자를 정리하고 Segoe UI / 맑은 고딕 글꼴을 적용한다.
+  이전 전역 Qt 스타일과 수동 드롭다운 화살표 코드를 제거한다.
+- Qt와 Fluent의 생성자·날짜·콤보 데이터 전달 차이는 `fluent_ui.py`에서 처리한다.
+  가스 적산, 파일명 선별, 중복 시각 1초 가정, 행 단위 제외, 캐시와 백그라운드 처리는 유지한다.
+  집계 중에는 경로 변경을 막고, 메인 창 종료 시 취소 완료 후 닫는다.
+  포함된 가스 화면에서 Esc를 눌러도 화면이 사라지지 않는다.
+- 검증: 테스트 89개 통과, `pip check` 통과. 실제 탐색 메뉴 클릭, CSV 그래프 표시,
+  집계 후 화면 전환과 결과 유지, 날짜 선택, 탭별 내보내기 범위, 집계 중 종료를 확인했다.
+  1440×1000 및 1000×680 화면과 가스 집계·계산 설정·기간 추이·설정 화면을 offscreen으로 렌더링해 검토했다.
+  `dist/LogPlotter_v3.08.exe` 빌드 후 최신 UI·계산 모듈 포함 및 offscreen 시작을 확인했다.
+- 새 의존성의 라이선스 안내 및 배포본 원문은 `third_party/`에 기록하고 실행 파일에도 포함한다.
 
 ### v3.07 — 2026-11-17
 

@@ -11,6 +11,10 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QMessageBox, QPushButton, QSplitter, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
+from qfluentwidgets import PushButton as QPushButton, LineEdit as QLineEdit, TableWidget as QTableWidget
+from fluent_ui import FluentLineEdit as QLineEdit
+from fluent_ui import FluentComboBox as QComboBox
+
 
 
 SUMMARY_COLUMNS = ["Segment", "Step", "Occurrence", "Step name", "Start", "End",

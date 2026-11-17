@@ -1,5 +1,8 @@
 """Compact per-Tube cards matching the monthly plant overview."""
 
+from qfluentwidgets import CardWidget
+from PySide6.QtGui import QColor
+
 import re
 import pandas as pd
 from ui_theme import apply_shadow
@@ -11,15 +14,12 @@ def volume_text(value):
     return "— ft³" if pd.isna(value) else f"{value:,.6f} ft³"
 
 
-class TubeUsageCard(QFrame):
+class TubeUsageCard(CardWidget):
     def __init__(self, tube, channels, parent=None):
         super().__init__(parent)
         self.setObjectName("tubeUsageCard")
-        self.setStyleSheet("""
-            QFrame#tubeUsageCard {background:white; border:1px solid #d9dee7; border-radius:18px;}
-            QFrame#tubeUsageCard QLabel {background:transparent; border:0; padding:0; color:#172b3c;}
-        """)
-        apply_shadow(self, blur=22, y_offset=4)
+        self.setBorderRadius(8)
+        apply_shadow(self, blur=12, y_offset=2, color=QColor(0, 0, 0, 18))
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 12, 18, 12)
         root.setSpacing(5)

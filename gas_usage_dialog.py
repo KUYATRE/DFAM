@@ -17,6 +17,12 @@ from PySide6.QtWidgets import (
 
 from ui_theme import (apply_chrome_input_styles, apply_shadow, ChromeComboBox as QComboBox,
                       ChromeDateEdit as QDateEdit, ChromeDoubleSpinBox as QDoubleSpinBox)
+from qfluentwidgets import (PushButton as QPushButton, PrimaryPushButton,
+    LineEdit as QLineEdit, CheckBox as QCheckBox, TableWidget as QTableWidget,
+    ProgressBar as QProgressBar, ScrollArea as QScrollArea, CardWidget, FluentIcon as FIF)
+from fluent_ui import FluentLineEdit as QLineEdit
+from fluent_ui import FluentTabs as QTabWidget, APP_VERSION
+
 from gas_usage_cards import TubeUsageCard, volume_text
 
 from gas_usage import (
@@ -56,9 +62,12 @@ class GasUsageWorker(QThread):
 
 
 class GasUsageDialog(QDialog):
-    def __init__(self, proc_log_dir, parent=None, settings=None):
+    def __init__(self, proc_log_dir, parent=None, settings=None, *, embedded=False):
         super().__init__(parent)
-        self.setWindowTitle("MONTHLY GAS FLOW · v3.07")
+        self._embedded = embedded
+        self.setWindowTitle(f"가스 사용량 · {APP_VERSION}")
+        if embedded:
+            self.setWindowFlags(Qt.Widget)
         self.resize(1180, 1000)
         self.settings = settings if settings is not None else QSettings("DFAM", "GasUsage")
         self.result = None
@@ -71,38 +80,18 @@ class GasUsageDialog(QDialog):
         self.tube_cards = {}
         self._card_signature = None
         self.setObjectName("gasUsageDialog")
-        self.setStyleSheet("""
-            QDialog#gasUsageDialog {background:#f5f6f8; color:#1f2937;}
-            QDialog#gasUsageDialog QLabel {background:transparent;}
-            QPushButton {background:white; color:#1f2937; border:1px solid #d9dee7;
-                         border-radius:10px; padding:8px 14px; font-weight:600;}
-            QPushButton:hover {background:#f0f5fc; border-color:#bccbdf;}
-            QPushButton:pressed, QPushButton:checked {background:#eaf2ff; color:#0f6cbd;}
-            QPushButton:disabled {background:#f3f4f6; color:#9ca3af; border-color:#e5e7eb;}
-            QPushButton[primary="true"] {background:#0f6cbd; color:white; border-color:#0f6cbd;}
-            QPushButton[primary="true"]:hover {background:#115ea3;}
-            QPushButton[primary="true"]:disabled {background:#b6cce1; border-color:#b6cce1;}
-            QGroupBox {background:white; border:1px solid #d9dee7; border-radius:14px;
-                       margin-top:10px; padding:16px 12px 8px;}
-            QGroupBox::title {subcontrol-origin:margin; left:16px; color:#526675;}
-            QTableWidget {background:white; alternate-background-color:#f8fafc;
-                          border:1px solid #d9dee7; border-radius:12px; padding:6px;
-                          gridline-color:#eef2f7; selection-background-color:#eaf2ff;
-                          selection-color:#1f2937;}
-            QHeaderView::section {background:#f8fafc; color:#64748b; border:0;
-                                  border-bottom:1px solid #e5e7eb; padding:9px;}
-        """)
+        self.setStyleSheet("QDialog#gasUsageDialog {background:transparent;} QLabel {background:transparent;}")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 18)
         layout.setSpacing(10)
 
-        banner = QFrame()
+        banner = CardWidget()
+        banner.setBorderRadius(8)
         banner.setObjectName("gasBanner")
-        banner.setStyleSheet("QFrame#gasBanner {background:white; border:1px solid #d9dee7; border-radius:18px;} QFrame#gasBanner QLabel {color:#1f2937; background:transparent; border:0;}")
-        apply_shadow(banner)
+        apply_shadow(banner, blur=12, y_offset=2, color=QColor(0, 0, 0, 16))
         header = QHBoxLayout(banner)
         header.setContentsMargins(20, 13, 20, 13)
-        title = QLabel("MONTHLY GAS FLOW")
+        title = QLabel("가스 사용량")
         title.setStyleSheet("font-size:23px; font-weight:700; color:#243f54;")
         header.addWidget(title)
         header.addStretch()
@@ -124,7 +113,7 @@ class GasUsageDialog(QDialog):
         self.settings_toggle = QPushButton("경로 / 계산 설정")
         self.settings_toggle.setCheckable(True)
         toolbar.addWidget(self.settings_toggle)
-        self.calculate_button = QPushButton("선택 월 집계")
+        self.calculate_button = PrimaryPushButton(FIF.PLAY, "선택 월 집계")
         self.calculate_button.setProperty("primary", True)
         self.calculate_button.clicked.connect(self.start_calculation)
         toolbar.addWidget(self.calculate_button)
@@ -200,15 +189,6 @@ class GasUsageDialog(QDialog):
         layout.addWidget(self.status)
 
         self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.tabs.setStyleSheet("""
-            QTabWidget::pane {border:0; background:transparent; top:8px;}
-            QTabBar {background:transparent;}
-            QTabBar::tab {background:#e9edf3; color:#64748b; border:1px solid transparent;
-                          border-radius:10px; padding:10px 20px; margin:2px 8px 6px 0;}
-            QTabBar::tab:hover {background:#e2ecfa; color:#0f6cbd;}
-            QTabBar::tab:selected {background:white; border-color:#cad9ec; color:#0f6cbd; font-weight:700;}
-        """)
         self._build_monthly_page()
         self._build_trend_page()
         self.tube_table, self.issues_table = (QTableWidget() for _ in range(2))
@@ -235,8 +215,6 @@ class GasUsageDialog(QDialog):
         self.selected_month.dateChanged.connect(self.month_changed)
         self.tabs.currentChanged.connect(self.tab_changed)
         apply_chrome_input_styles(self)
-        for button in self.findChildren(QPushButton):
-            apply_shadow(button, blur=12, y_offset=2, color=QColor(15, 23, 42, 28))
         self.refresh_monthly()
         self.refresh_views()
 
@@ -262,10 +240,10 @@ class GasUsageDialog(QDialog):
         self.cards_layout.setAlignment(Qt.AlignTop)
         scroll.setWidget(body)
         layout.addWidget(scroll, 1)
-        footer = QFrame()
+        footer = CardWidget()
+        footer.setBorderRadius(8)
         footer.setObjectName("gasTotals")
-        footer.setStyleSheet("QFrame#gasTotals {background:white; border:1px solid #d9dee7; border-radius:18px;} QFrame#gasTotals QLabel {background:transparent; border:0;}")
-        apply_shadow(footer)
+        apply_shadow(footer, blur=12, y_offset=2, color=QColor(0, 0, 0, 16))
         totals = QHBoxLayout(footer)
         totals.setContentsMargins(20, 17, 20, 17)
         self.monthly_totals = {}
@@ -611,6 +589,10 @@ class GasUsageDialog(QDialog):
         QMessageBox.information(self, "내보내기 완료", "선택한 집계 범위의 모든 Tube 결과와 계산 설정을 저장했습니다.")
 
     def reject(self):
+        if self._embedded:
+            if self.worker is not None:
+                self.cancel_calculation()
+            return
         if self.worker is not None:
             self._close_when_finished = True
             self.cancel_calculation()
