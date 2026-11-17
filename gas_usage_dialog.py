@@ -1,6 +1,7 @@
 """Monthly gas dashboard; CSV scanning runs outside the GUI thread."""
 
 from pathlib import Path
+from background_work import background_resources
 
 import pandas as pd
 from PySide6.QtCore import QDate, QMargins, QSettings, QStandardPaths, QThread, Qt, Signal
@@ -38,9 +39,13 @@ class GasUsageWorker(QThread):
         try:
             cache = (Path(QStandardPaths.writableLocation(QStandardPaths.GenericCacheLocation))
                      / "DFAM" / "GasUsage" / "file_periods.sqlite3")
-            result = calculate_monthly_usage(
-                self.root, self.config, self.progress.emit,
-                self.isInterruptionRequested, period_cache=cache)
+            with background_resources() as background_enabled:
+                result = calculate_monthly_usage(
+                    self.root, self.config, self.progress.emit,
+                    self.isInterruptionRequested, period_cache=cache,
+                    cooperate=lambda: self.msleep(5))
+            result.settings.loc[len(result.settings)] = [
+                "Scheduling", "Windows background resources" if background_enabled else "Qt low thread priority"]
             if self.isInterruptionRequested():
                 raise CalculationCancelled()
             self.succeeded.emit(result)
@@ -53,7 +58,7 @@ class GasUsageWorker(QThread):
 class GasUsageDialog(QDialog):
     def __init__(self, proc_log_dir, parent=None, settings=None):
         super().__init__(parent)
-        self.setWindowTitle("MONTHLY GAS FLOW · v3.04")
+        self.setWindowTitle("MONTHLY GAS FLOW · v3.05")
         self.resize(1180, 1000)
         self.settings = settings if settings is not None else QSettings("DFAM", "GasUsage")
         self.result = None
@@ -445,7 +450,7 @@ class GasUsageDialog(QDialog):
         self.worker.failed.connect(self.show_error)
         self.worker.cancelled.connect(lambda: self.status.setText("집계를 취소했습니다. 결과는 저장되지 않았습니다."))
         self.worker.finished.connect(self.worker_finished)
-        self.worker.start()
+        self.worker.start(QThread.LowPriority)
 
     def update_progress(self, done, total, name):
         self.progress.setRange(0, max(total, 1))
@@ -493,6 +498,8 @@ class GasUsageDialog(QDialog):
         prefix = "집계 완료" if has_volume else "선택 기간에 집계 가능한 기록이 없습니다"
         values = result.settings.set_index("Setting")["Value"]
         skipped = int(values.get("Skipped outside period", 0))
+        if str(values.get("Result cache", "")).startswith("Reused"):
+            prefix += " (변경 없음 · 결과 재사용)"
         period = values["Months"].split(" ~ ")
         label = period[0] if period[0] == period[1] else " ~ ".join(period)
         self.status.setText(f"{label} · {prefix} · 집계 대상 파일 {len(result.files):,}개 · 기간 외 제외 {skipped:,}개 · 검토 {len(result.issues):,}개. "

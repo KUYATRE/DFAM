@@ -1,5 +1,6 @@
 """Integrate recorded gas flow without extending it beyond observed intervals."""
 
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -7,6 +8,9 @@ import sqlite3
 
 import numpy as np
 import pandas as pd
+from gas_usage_storage import CSV_CHUNK_ROWS, DiskIntervalStore
+from gas_usage_cache import (query_key, source_fingerprint, load_result, save_result,
+                             component_key, load_component, save_component)
 
 
 # Exact geometric conversion; retain the standard conditions of the source sccm.
@@ -74,20 +78,26 @@ def tube_from_path(path):
     return None
 
 
-def read_flow_csv(path, config):
+def read_flow_csv(path, config, encoding="utf-8-sig"):
     wanted = {config.time_column, *config.n2_columns, *config.o2_columns, "Tube ID", "TubeID"}
-    last_error = None
-    for encoding in ("utf-8-sig", "cp949", "euc-kr"):
-        try:
-            df = pd.read_csv(path, encoding=encoding, low_memory=False,
-                             usecols=lambda c: normalize_column(c) in wanted)
-            df.columns = [normalize_column(c) for c in df.columns]
-            if df.columns.duplicated().any():
-                raise ValueError("공백 제거 후 중복되는 컬럼이 있습니다.")
-            return df
-        except UnicodeDecodeError as exc:
-            last_error = exc
-    raise ValueError(f"CSV 인코딩을 읽을 수 없습니다: {last_error}")
+    return pd.read_csv(path, encoding=encoding, dtype=str, chunksize=CSV_CHUNK_ROWS,
+                       usecols=lambda c: normalize_column(c) in wanted)
+
+
+class IssueCounts:
+    def __init__(self):
+        self.counts = Counter()
+
+    def append(self, issue):
+        file, message, count = issue
+        self.counts[file, message] += int(count)
+
+    def extend(self, other):
+        for row in other:
+            self.append(row)
+
+    def __iter__(self):
+        return ([file, message, count] for (file, message), count in self.counts.items())
 
 
 def parse_times(raw):
@@ -104,14 +114,15 @@ def parse_times(raw):
     return result
 
 
-def read_time_bounds(path, time_column, cancelled=lambda: False):
+def read_time_bounds(path, time_column, cancelled=lambda: False, cooperate=lambda: None):
     """Inspect only timestamps; a filename alone cannot exclude a crossing run."""
     for encoding in ("utf-8-sig", "cp949", "euc-kr"):
         try:
             first = last = None
-            with pd.read_csv(path, encoding=encoding, chunksize=100_000,
+            with pd.read_csv(path, encoding=encoding, chunksize=CSV_CHUNK_ROWS,
                              usecols=lambda c: normalize_column(c) == time_column) as reader:
                 for chunk in reader:
+                    cooperate()
                     if cancelled():
                         raise CalculationCancelled()
                     if len(chunk.columns) != 1:
@@ -151,7 +162,7 @@ class LogPeriodIndex:
             self.connection.close()
             self.connection = None
 
-    def bounds(self, path, time_column, cancelled):
+    def bounds(self, path, time_column, cancelled, cooperate=lambda: None):
         stat = path.stat()
         fingerprint = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
         key = (str(path.resolve()), time_column)
@@ -164,7 +175,7 @@ class LogPeriodIndex:
                     return row[3:]
             except sqlite3.Error:
                 self.close()
-        bounds = read_time_bounds(path, time_column, cancelled)
+        bounds = read_time_bounds(path, time_column, cancelled, cooperate)
         after = path.stat()
         if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != fingerprint:
             # A live log changed during inspection: include it and do not cache it.
@@ -178,7 +189,7 @@ class LogPeriodIndex:
         return bounds
 
 
-def flow_intervals(df, path, tube, config, issues):
+def flow_intervals(df, path, tube, config, issues, *, carried=False):
     """Keep each original adjacent pair; never bridge invalid rows or files."""
     file = str(path)
 
@@ -186,15 +197,11 @@ def flow_intervals(df, path, tube, config, issues):
         if count:
             issues.append([file, message, int(count)])
 
-    if config.time_column not in df or len(df) < 2:
-        raise ValueError("시간 컬럼이 없거나 기록이 2행 미만입니다.")
-    for column in ("Tube ID", "TubeID"):
-        if column in df:
-            ids = pd.to_numeric(df[column], errors="coerce").dropna().unique()
-            if len(ids) != 1 or ids[0] != int(tube[4:]):
-                raise ValueError("Tube ID와 파일명/폴더의 Tube가 일치하지 않습니다.")
+    if config.time_column not in df:
+        raise ValueError("시간 컬럼이 없습니다.")
+    fresh = slice(1, None) if carried else slice(None)
     times = parse_times(df[config.time_column])
-    issue("잘못되거나 누락된 시각 (인접 구간 제외)", times.isna().sum())
+    issue("잘못되거나 누락된 시각 (인접 구간 제외)", times.isna().iloc[fresh].sum())
     ns = times.to_numpy(dtype="datetime64[ns]").astype("int64")
     valid_time = times.notna().to_numpy()
     # Compute differences only for valid timestamps, avoiding NaT overflow.
@@ -213,12 +220,13 @@ def flow_intervals(df, path, tube, config, issues):
     for gas, columns in (("N2", config.n2_columns), ("O2", config.o2_columns)):
         missing = [c for c in columns if c not in df]
         if missing:
-            issue(f"{gas} 집계 제외: 컬럼 누락 ({', '.join(missing)})")
+            if not carried:
+                issue(f"{gas} 집계 제외: 컬럼 누락 ({', '.join(missing)})")
             continue
         values = df[list(columns)].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
         rates = values.sum(axis=1)
         good = np.isfinite(values).all(axis=1) & (values >= 0).all(axis=1) & np.isfinite(rates)
-        issue(f"{gas} 음수/결측/비수치 유량 (인접 구간 제외)", (~good).sum())
+        issue(f"{gas} 음수/결측/비수치 유량 (인접 구간 제외)", (~good)[fresh].sum())
         mask = valid & good[:-1] & good[1:]
         if mask.any():
             intervals = pd.DataFrame({"Tube": tube, "Gas": gas,
@@ -233,46 +241,184 @@ def flow_intervals(df, path, tube, config, issues):
     return frames, record
 
 
-def integrate_intervals(intervals, config, issues, cancelled=lambda: False):
-    """Trapezoids, clipped at query/month boundaries and prior covered intervals."""
-    rows, channel_rows = [], []
-    months = pd.period_range(config.start_month, config.end_month, freq="M")
-    for (tube, gas), group in intervals.groupby(["Tube", "Gas"], sort=True):
-        if cancelled():
-            raise CalculationCancelled()
-        group = group.sort_values(["start", "File", "end"], kind="stable")
-        start, end = group["start"].to_numpy(), group["end"].to_numpy()
-        q0, q1 = group["q0"].to_numpy(), group["q1"].to_numpy()
-        covered = np.maximum.accumulate(end)
-        prior_end = np.concatenate(([np.iinfo(np.int64).min], covered[:-1]))
-        unique_start = np.maximum(start, prior_end)
-        overlap = unique_start > start
-        for file, count in group.loc[overlap, "File"].value_counts().items():
-            issues.append([file, f"{gas} 중복/겹침 구간은 한 번만 집계 (시작 시각·파일 경로 순 우선)", int(count)])
-        for month in months:
+def stage_flow_file(store, path, file_id, tube, config, cancelled, cooperate):
+    """Stage one CSV atomically; retain one boundary row between read chunks."""
+    for encoding in ("utf-8-sig", "cp949", "euc-kr"):
+        store.begin_file()
+        issues = IssueCounts()
+        count, carry, first, last = 0, None, pd.NaT, pd.NaT
+        tube_ids = {}
+        try:
+            with read_flow_csv(path, config, encoding) as reader:
+                for chunk in reader:
+                    cooperate()
+                    if cancelled():
+                        raise CalculationCancelled()
+                    chunk.columns = [normalize_column(c) for c in chunk.columns]
+                    if chunk.columns.duplicated().any():
+                        raise ValueError("공백 제거 후 중복되는 컬럼이 있습니다.")
+                    for column in ("Tube ID", "TubeID"):
+                        if column in chunk:
+                            ids = pd.to_numeric(chunk[column], errors="coerce").dropna()
+                            tube_ids[column] = tube_ids.get(column, False) or not ids.empty
+                            if (ids != int(tube[4:])).any():
+                                raise ValueError("Tube ID와 파일명/폴더의 Tube가 일치하지 않습니다.")
+                    count += len(chunk)
+                    block = pd.concat([carry, chunk], ignore_index=True) if carry is not None else chunk
+                    pieces, record = flow_intervals(block, path, tube, config, issues, carried=carry is not None)
+                    for frame in pieces:
+                        columns = config.n2_columns if frame["Gas"].iloc[0] == "N2" else config.o2_columns
+                        store.append(frame, file_id, columns)
+                    lo, hi = pd.Timestamp(record[3]), pd.Timestamp(record[4])
+                    if pd.notna(lo):
+                        first = lo if pd.isna(first) else min(first, lo)
+                        last = hi if pd.isna(last) else max(last, hi)
+                    carry = chunk.iloc[-1:].copy()  # A view would retain the entire chunk.
+            if count < 2:
+                raise ValueError("시간 컬럼이 없거나 기록이 2행 미만입니다.")
+            if not all(tube_ids.values()):
+                raise ValueError("Tube ID와 파일명/폴더의 Tube가 일치하지 않습니다.")
+            store.finish_file()
+            return [str(path), tube, count, str(first), str(last)], issues
+        except UnicodeDecodeError:
+            store.discard_file()
+            continue
+        except BaseException:
+            store.discard_file()
+            raise
+    raise ValueError("CSV 인코딩을 읽을 수 없습니다.")
+
+
+class NeedsDiskOrdering(Exception):
+    pass
+
+
+class SourceChanged(Exception):
+    pass
+
+
+class IntervalTotals:
+    def __init__(self, config):
+        self.config = config
+        self.months = pd.period_range(config.start_month, config.end_month, freq="M")
+        self.values = {}
+
+    def add(self, tube, gas, start, end, q0, q1, channels, unique_start=None):
+        n = channels.shape[1] // 2
+        if unique_start is None:
+            unique_start = start
+        for month in self.months:
             lo = np.maximum(unique_start, month.start_time.value)
             hi = np.minimum(end, (month + 1).start_time.value)
             keep = hi > lo
             if not keep.any():
                 continue
             duration = end[keep] - start[keep]
-            left = q0[keep] + (q1[keep] - q0[keep]) * ((lo[keep] - start[keep]) / duration)
-            right = q0[keep] + (q1[keep] - q0[keep]) * ((hi[keep] - start[keep]) / duration)
+            left_fraction = (lo[keep] - start[keep]) / duration
+            right_fraction = (hi[keep] - start[keep]) / duration
             seconds = (hi[keep] - lo[keep]) / 1e9
-            volume = np.sum((left + right) * 0.5 * seconds / 60.0) / CM3_PER_FT3
-            rows.append([str(month), tube, gas, float(volume), float(seconds.sum() / 3600)])
-            # Use exactly the same valid and deduplicated intervals as the gas total.
-            # Independent channel deduplication could otherwise make the cards disagree.
-            for channel in config.n2_columns if gas == "N2" else config.o2_columns:
-                c0 = group[f"channel0:{channel}"].to_numpy()[keep]
-                c1 = group[f"channel1:{channel}"].to_numpy()[keep]
-                left_channel = c0 + (c1 - c0) * ((lo[keep] - start[keep]) / duration)
-                right_channel = c0 + (c1 - c0) * ((hi[keep] - start[keep]) / duration)
-                channel_volume = np.sum((left_channel + right_channel) * 0.5 * seconds / 60) / CM3_PER_FT3
-                channel_rows.append([str(month), tube, gas, channel,
-                                     float(channel_volume), float(seconds.sum() / 3600)])
-    return (pd.DataFrame(rows, columns=["Month", "Tube", "Gas", "Volume", "Hours"]),
-            pd.DataFrame(channel_rows, columns=CHANNEL_COLUMNS))
+            left = q0[keep] + (q1[keep] - q0[keep]) * left_fraction
+            right = q0[keep] + (q1[keep] - q0[keep]) * right_fraction
+            volume = np.sum((left + right) * .5 * seconds / 60) / CM3_PER_FT3
+            c0, c1 = channels[keep, :n], channels[keep, n:]
+            left_c = c0 + (c1 - c0) * left_fraction[:, None]
+            right_c = c0 + (c1 - c0) * right_fraction[:, None]
+            channel_volume = np.sum((left_c + right_c) * .5 * seconds[:, None] / 60, axis=0) / CM3_PER_FT3
+            values = np.r_[volume, seconds.sum() / 3600, channel_volume]
+            self.values.setdefault((tube, gas, str(month)), np.zeros(n + 2))[:] += values
+
+    def merge(self, other):
+        for key, values in other.values.items():
+            self.values.setdefault(key, np.zeros_like(values))[:] += values
+
+    def frames(self):
+        rows, channel_rows = [], []
+        for (tube, gas, month), values in sorted(self.values.items()):
+            rows.append([month, tube, gas, values[0], values[1]])
+            columns = self.config.n2_columns if gas == "N2" else self.config.o2_columns
+            for index, column in enumerate(columns):
+                channel_rows.append([month, tube, gas, column, values[index + 2], values[1]])
+        return (pd.DataFrame(rows, columns=["Month", "Tube", "Gas", "Volume", "Hours"]),
+                pd.DataFrame(channel_rows, columns=CHANNEL_COLUMNS))
+
+
+class DirectIntervalStore:
+    """Constant-space fast path for one chronologically ordered, isolated file."""
+    def __init__(self, config):
+        self.config = config
+        self.begin_file()
+
+    def begin_file(self):
+        self.totals = IntervalTotals(self.config)
+        self.previous_end = {}
+
+    def finish_file(self):
+        pass
+
+    def discard_file(self):
+        self.begin_file()
+
+    def append(self, frame, file_id, columns):
+        tube, gas = frame["Tube"].iloc[0], frame["Gas"].iloc[0]
+        start, end = frame["start"].to_numpy(), frame["end"].to_numpy()
+        if start[0] < self.previous_end.get(gas, np.iinfo(np.int64).min) or (start[1:] < end[:-1]).any():
+            raise NeedsDiskOrdering()
+        self.previous_end[gas] = int(end[-1])
+        channels = np.column_stack([frame[f"channel{endpoint}:{c}"].to_numpy()
+                                   for endpoint in (0, 1) for c in columns])
+        self.totals.add(tube, gas, start, end, frame["q0"].to_numpy(), frame["q1"].to_numpy(), channels)
+
+
+def overlap_components(paths, bounds):
+    """Only files with potentially overlapping actual time ranges need disk ordering."""
+    tubes = {}
+    for index, path in enumerate(paths):
+        tubes.setdefault(tube_from_path(path), []).append(index)
+    components = []
+    for indices in tubes.values():
+        if any(bounds[i] is None for i in indices):
+            components.append(indices)
+            continue
+        group, covered = [], None
+        for index in sorted(indices, key=lambda i: (bounds[i][0], i)):
+            start, end = bounds[index]
+            if covered is not None and start >= covered:
+                components.append(group)
+                group = []
+            group.append(index)
+            covered = end if len(group) == 1 else max(covered, end)
+        if group:
+            components.append(group)
+    return components
+
+
+def integrate_intervals(store, config, issues, paths, cancelled=lambda: False, cooperate=lambda: None):
+    """Read ordered disk batches, carrying covered-end state across boundaries."""
+    totals = IntervalTotals(config)
+    for tube, gas in store.groups():
+        columns = config.n2_columns if gas == "N2" else config.o2_columns
+        n = len(columns)
+        previous_end = np.iinfo(np.int64).min
+        for batch in store.batches(tube, gas, CSV_CHUNK_ROWS):
+            cooperate()
+            if cancelled():
+                raise CalculationCancelled()
+            start = np.array([r[0] for r in batch], dtype=np.int64)
+            end = np.array([r[1] for r in batch], dtype=np.int64)
+            files = np.array([r[2] for r in batch], dtype=np.int64)
+            q0 = np.array([r[3] for r in batch])
+            q1 = np.array([r[4] for r in batch])
+            channels = np.frombuffer(b"".join(r[5] for r in batch), dtype="<f8").reshape(-1, 2 * n)
+            covered = np.maximum.accumulate(end)
+            prior_end = np.concatenate(([previous_end], covered[:-1]))
+            prior_end = np.maximum(prior_end, previous_end)
+            unique_start = np.maximum(start, prior_end)
+            previous_end = max(previous_end, int(covered[-1]))
+            ids, counts = np.unique(files[unique_start > start], return_counts=True)
+            for file_id, count in zip(ids, counts):
+                issues.append([str(paths[file_id]), f"{gas} 중복/겹침 구간은 한 번만 집계 (시작 시각·파일 경로 순 우선)", count])
+            totals.add(tube, gas, start, end, q0, q1, channels, unique_start)
+    return totals
 
 
 def summarize_usage(integrated, identities, config):
@@ -300,7 +446,7 @@ def summarize_usage(integrated, identities, config):
 
 
 def calculate_monthly_usage(root, config, progress=lambda done, total, name: None,
-                            cancelled=lambda: False, *, period_cache=None):
+                            cancelled=lambda: False, *, period_cache=None, cooperate=lambda: None, temp_parent=None):
     config.validate()
     root = Path(root)
     if not root.is_dir():
@@ -312,8 +458,20 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
         if path.is_file() and path.suffix.lower() == ".csv":
             paths.append(path)
     paths.sort()
-    issues, frames, records, identities = [], [], [], set()
-    candidates = []
+    if cancelled():
+        raise CalculationCancelled()
+    key = query_key(root, config)
+    fingerprint = source_fingerprint(paths) if period_cache is not None else None
+    cached = load_result(period_cache, key, fingerprint)
+    if cached is not None:
+        if cancelled():
+            raise CalculationCancelled()
+        result = GasUsageResult(**cached)
+        result.settings.loc[result.settings["Setting"] == "Result cache", "Value"] = "Reused (source metadata unchanged)"
+        progress(len(paths), len(paths), "변경 없는 로그의 집계 결과 재사용")
+        return result
+    issues, records, identities = IssueCounts(), [], set()
+    candidates, candidate_bounds = [], []
     period_start = pd.Period(config.start_month, "M").start_time.value
     period_end = (pd.Period(config.end_month, "M") + 1).start_time.value
     index = LogPeriodIndex(period_cache)
@@ -323,7 +481,7 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
                 raise CalculationCancelled()
             progress(i, len(paths), "기록 기간 확인 (최초/변경 파일의 시간 컬럼만 확인)")
             try:
-                bounds = index.bounds(path, config.time_column, cancelled)
+                bounds = index.bounds(path, config.time_column, cancelled, cooperate)
             except (ValueError, OSError, pd.errors.ParserError):
                 bounds = None  # Let the regular reader report unusable files.
             if bounds is not None and (bounds[1] < period_start or bounds[0] >= period_end):
@@ -332,36 +490,99 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
                     identities.add(tube)
                 continue
             candidates.append(path)
+            candidate_bounds.append(bounds)
     finally:
         index.close()
-    for i, path in enumerate(candidates):
-        if cancelled():
-            raise CalculationCancelled()
-        progress(i, len(candidates), f"유량 집계 · {path.name}")
+    totals = IntervalTotals(config)
+    completed = 0
+    direct_files, disk_files, reused_files = 0, 0, 0
+    component_issues = IssueCounts()
+
+    def process_file(store, i):
+        path = candidates[i]
         tube = tube_from_path(path)
         if tube is None:
-            issues.append([str(path), "Tube를 파일명/폴더에서 식별할 수 없어 제외", 1])
-            continue
+            component_issues.append([str(path), "Tube를 파일명/폴더에서 식별할 수 없어 제외", 1])
+            return
         try:
-            df = read_flow_csv(path, config)
-            pieces, record = flow_intervals(df, path, tube, config, issues)
-            frames.extend(pieces)
+            record, file_issues = stage_flow_file(store, path, i, tube, config, cancelled, cooperate)
+            known = candidate_bounds[i]
+            lo, hi = pd.Timestamp(record[3]), pd.Timestamp(record[4])
+            if known is not None and pd.notna(lo) and (lo.value < known[0] or hi.value > known[1]):
+                raise SourceChanged("로그의 기록 기간이 집계 중 변경되었습니다. 다시 집계하세요.")
+            component_issues.extend(file_issues)
             records.append(record)
             identities.add(tube)
         except (ValueError, OSError, pd.errors.ParserError) as exc:
-            issues.append([str(path), f"파일 제외: {exc}", 1])
-    progress(len(candidates), len(candidates), "월별 합계 계산 중")
-    if cancelled():
-        raise CalculationCancelled()
-    columns = ["Month", "Tube", "Gas", "Volume", "Hours"]
-    integrated, channels = (integrate_intervals(pd.concat(frames, ignore_index=True), config, issues, cancelled)
-                            if frames else (pd.DataFrame(columns=columns), pd.DataFrame(columns=CHANNEL_COLUMNS)))
+            component_issues.append([str(path), f"파일 제외: {exc}", 1])
+
+    try:
+        for component in overlap_components(candidates, candidate_bounds):
+            if cancelled():
+                raise CalculationCancelled()
+            component_paths = [candidates[i] for i in component]
+            ck = component_key(key, component_paths)
+            cf = source_fingerprint(component_paths) if period_cache is not None else None
+            cached = load_component(period_cache, ck, cf)
+            if cached is not None:
+                partial = IntervalTotals(config)
+                partial.values = {(tube, gas, month): np.asarray(values, dtype=float)
+                                  for tube, gas, month, values in cached["totals"]}
+                totals.merge(partial)
+                records.extend(cached["records"])
+                identities.update(r[1] for r in cached["records"])
+                issues.extend(cached["issues"])
+                reused_files += len(component)
+                completed += len(component)
+                progress(completed, len(candidates), "변경 없는 파일의 부분 집계 재사용")
+                continue
+            component_issues = IssueCounts()
+            record_start = len(records)
+            partial = None
+            if len(component) == 1:
+                i = component[0]
+                progress(completed, len(candidates), f"유량 집계 · {candidates[i].name}")
+                direct = DirectIntervalStore(config)
+                try:
+                    process_file(direct, i)
+                    partial = direct.totals
+                    direct_files += 1
+                    completed += 1
+                except NeedsDiskOrdering:
+                    pass  # Retry the entire file, without its discarded partial totals.
+            if partial is None:
+                with DiskIntervalStore(cancelled, temp_parent=temp_parent) as store:
+                    for i in component:
+                        progress(completed, len(candidates), f"유량 집계 · {candidates[i].name}")
+                        process_file(store, i)
+                        disk_files += 1
+                        completed += 1
+                    progress(completed, len(candidates), "겹친 구간 정리 및 월별 합계 계산 중")
+                    partial = integrate_intervals(store, config, component_issues, candidates, cancelled, cooperate)
+            totals.merge(partial)
+            issues.extend(component_issues)
+            if cf is not None and source_fingerprint(component_paths) == cf:
+                save_component(period_cache, ck, cf, {
+                    "totals": [[*group_key, values.tolist()] for group_key, values in partial.values.items()],
+                    "records": records[record_start:], "issues": list(component_issues)})
+        progress(len(candidates), len(candidates), "월별 합계 계산 중")
+        if cancelled():
+            raise CalculationCancelled()
+        integrated, channels = totals.frames()
+    except sqlite3.OperationalError:
+        if cancelled():
+            raise CalculationCancelled() from None
+        raise
     tubes, monthly = summarize_usage(integrated, identities, config)
     settings = pd.DataFrame([
         ["Root", str(root.resolve())], ["Months", f"{config.start_month} ~ {config.end_month}"],
         ["File selection", "Actual timestamp bounds intersect query; filenames do not determine the period"],
         ["Scanned files", len(paths)], ["Candidate files", len(candidates)],
         ["Skipped outside period", len(paths) - len(candidates)],
+        ["Processing", f"Streaming {CSV_CHUNK_ROWS} rows per batch; isolated ordered files integrate directly; disk ordering only for overlaps"],
+        ["Direct streaming files", direct_files], ["Disk ordering files", disk_files],
+        ["Reused files", reused_files],
+        ["Result cache", "Fresh calculation"],
         ["Time", config.time_column], ["N2 sccm columns", ", ".join(config.n2_columns)],
         ["O2 sccm columns", ", ".join(config.o2_columns)],
         ["Maximum gap (s)", "Unlimited" if config.max_gap_seconds is None else config.max_gap_seconds],
@@ -372,9 +593,12 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
         ["Missing", "Blank is unavailable, not zero. Monthly totals sum available Tube values."],
         ["Recorded hours", "Monthly hours are summed Tube-hours, not elapsed calendar hours"],
     ], columns=["Setting", "Value"])
-    return GasUsageResult(tubes, monthly, pd.DataFrame(issues, columns=ISSUE_COLUMNS),
+    result = GasUsageResult(tubes, monthly, pd.DataFrame(list(issues), columns=ISSUE_COLUMNS),
                           pd.DataFrame(records, columns=["File", "Tube", "Rows", "First", "Last"]),
                           settings, channels)
+    if fingerprint is not None and source_fingerprint(paths) == fingerprint:
+        save_result(period_cache, key, fingerprint, result)
+    return result
 
 
 def select_usage_month(result, month):

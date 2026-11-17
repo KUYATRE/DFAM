@@ -272,6 +272,182 @@ class GasUsageTests(unittest.TestCase):
         self.assertFalse(result.files.empty)
         self.assertTrue(result.issues["Issue"].str.contains("잘못되거나 누락된 시각").any())
 
+    def test_streaming_keeps_boundary_pairs_and_bounds_chunk_memory(self):
+        from gas_usage import flow_intervals
+        self.write(log(pd.date_range("2026-01-01", periods=11, freq="1s").astype(str)))
+        with patch("gas_usage.CSV_CHUNK_ROWS", 3), patch("gas_usage.flow_intervals", wraps=flow_intervals) as chunks:
+            result = self.result()
+        self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 10 / 60)
+        self.assertEqual(result.files.iloc[0]["Rows"], 11)
+        self.assertGreater(len(chunks.call_args_list), 1)
+        self.assertLessEqual(max(len(c.args[0]) for c in chunks.call_args_list), 4)
+        self.assertEqual(result.settings.set_index("Setting").loc["Disk ordering files", "Value"], 0)
+
+    def test_single_row_chunks_split_month_boundary_without_extrapolation(self):
+        self.write(log(["2026-01-31 23:59:30", "2026-02-01 00:00:30"], n2=[0, 2 * CM3_PER_FT3]))
+        with patch("gas_usage.CSV_CHUNK_ROWS", 1):
+            result = self.result()
+        self.assertTrue(np.allclose(result.tubes["N2 (ft³)"], [.25, .75]))
+
+    def test_carried_invalid_row_is_reported_once_and_never_bridged(self):
+        frame = log(pd.date_range("2026-01-01", periods=5, freq="1min").astype(str))
+        frame.loc[2, DEFAULT_N2[0]] = -1
+        self.write(frame)
+        with patch("gas_usage.CSV_CHUNK_ROWS", 3):
+            result = self.result()
+        self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 2)
+        self.assertAlmostEqual(result.tubes.iloc[0]["O2 (ft³)"], 4)
+        bad = result.issues[result.issues["Issue"].str.contains("음수")]
+        self.assertEqual(bad["Count"].sum(), 1)
+
+    def test_late_tube_mismatch_discards_all_earlier_chunks(self):
+        frame = log(pd.date_range("2026-01-01", periods=6, freq="1min").astype(str))
+        frame.loc[5, "Tube ID"] = 2
+        self.write(frame)
+        with patch("gas_usage.CSV_CHUNK_ROWS", 2):
+            result = self.result()
+        self.assertTrue(result.tubes.empty)
+        self.assertTrue(result.channels.empty)
+        self.assertEqual(len(result.issues), 1)
+
+    def test_disk_batches_preserve_overlap_priority_and_covered_end(self):
+        for name, seconds, rate in (("a", (0,120), [CM3_PER_FT3,2*CM3_PER_FT3]),
+                                    ("b", (30,150), 3*CM3_PER_FT3),
+                                    ("c", (60,90), 8*CM3_PER_FT3),
+                                    ("d", (125,180), 4*CM3_PER_FT3)):
+            times = pd.Timestamp("2026-01-01") + pd.to_timedelta(seconds, unit="s")
+            self.write(log(times.astype(str), n2=rate), name=f"TUBE01_{name}.csv")
+        with patch("gas_usage.CSV_CHUNK_ROWS", 1):
+            result = self.result()
+        self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 6.5)
+        self.assertAlmostEqual(result.tubes.iloc[0]["N2 recorded (h)"], 3/60)
+        self.assertAlmostEqual(result.channels.query("Gas == 'N2'")["Volume (ft³)"].sum(), 6.5)
+
+    def test_reversed_file_falls_back_to_disk_without_keeping_partial_totals(self):
+        self.write(log(["2026-01-01 00:00:00", "2026-01-01 00:02:00",
+                        "2026-01-01 00:01:00", "2026-01-01 00:03:00"]))
+        with patch("gas_usage.CSV_CHUNK_ROWS", 2):
+            result = self.result()
+        self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 3)
+        self.assertEqual(result.files.iloc[0]["Rows"], 4)
+        self.assertEqual(result.settings.set_index("Setting").loc["Disk ordering files", "Value"], 1)
+
+    def test_late_encoding_failure_rolls_back_before_retry(self):
+        from contextlib import contextmanager
+        from gas_usage import read_flow_csv
+        frame = log(pd.date_range("2026-01-01", periods=4, freq="1min").astype(str))
+        self.write(frame)
+        @contextmanager
+        def reader(path, config, encoding):
+            if encoding == "utf-8-sig":
+                def bad_chunks():
+                    yield frame.iloc[:2]
+                    raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "late invalid byte")
+                yield bad_chunks()
+            else:
+                with read_flow_csv(path, config, encoding) as actual:
+                    yield actual
+        with patch("gas_usage.read_flow_csv", side_effect=reader), patch("gas_usage.CSV_CHUNK_ROWS", 2):
+            result = self.result()
+        self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 3)
+        self.assertEqual(result.files.iloc[0]["Rows"], 4)
+
+    def test_cancel_and_disk_space_failure_remove_temporary_database(self):
+        frame = log(["2026-01-01 00:00:00", "2026-01-01 00:01:00"])
+        self.write(frame, name="TUBE01_a.csv")
+        self.write(frame, name="TUBE01_b.csv")
+        scratch = self.root / "scratch"
+        scratch.mkdir()
+        stop = False
+        def progress(done, total, name):
+            nonlocal stop
+            if "겹친 구간 정리" in name:
+                stop = True
+        with self.assertRaises(CalculationCancelled):
+            calculate_monthly_usage(self.root, self.config, progress, lambda: stop, temp_parent=scratch)
+        self.assertEqual(list(scratch.iterdir()), [])
+        import shutil
+        usage = shutil.disk_usage(scratch)
+        with patch("gas_usage_storage.shutil.disk_usage", return_value=type(usage)(usage.total,usage.used,0)):
+            with self.assertRaisesRegex(RuntimeError, "1 GiB"):
+                calculate_monthly_usage(self.root, self.config, temp_parent=scratch)
+        self.assertEqual(list(scratch.iterdir()), [])
+
+    def test_result_cache_reuses_exact_values_and_new_overlap_recomputes_only_affected_tube(self):
+        from gas_usage import read_flow_csv
+        times = ["2026-01-01 00:00:00", "2026-01-01 00:01:00"]
+        self.write(log(times), name="TUBE01_a.csv")
+        self.write(log(times, tube=2), name="TUBE02_a.csv")
+        cache = self.root / "cache.sqlite3"
+        original = calculate_monthly_usage(self.root, self.config, period_cache=cache)
+        with patch("gas_usage.read_flow_csv", side_effect=AssertionError("Unexpected CSV read")):
+            reused = calculate_monthly_usage(self.root, self.config, period_cache=cache)
+        for name in ("tubes", "monthly", "channels", "files", "issues"):
+            pd.testing.assert_frame_equal(getattr(original,name),getattr(reused,name))
+        self.write(log(times), name="TUBE01_copy.csv")
+        with patch("gas_usage.read_flow_csv", wraps=read_flow_csv) as reader:
+            updated = calculate_monthly_usage(self.root, self.config, period_cache=cache)
+        self.assertEqual({c.args[0].name for c in reader.call_args_list}, {"TUBE01_a.csv","TUBE01_copy.csv"})
+        self.assertAlmostEqual(updated.monthly.iloc[0]["N2 (ft³)"], 2)
+        self.assertTrue(updated.issues["Issue"].str.contains("중복/겹침").any())
+        self.assertEqual(updated.settings.set_index("Setting").loc["Reused files","Value"], 1)
+
+    def test_added_disjoint_file_reads_only_new_file_and_deletion_removes_its_usage(self):
+        from gas_usage import read_flow_csv
+        self.write(log(["2026-01-01 00:00:00", "2026-01-01 00:01:00"]), name="TUBE01_a.csv")
+        cache = self.root / "cache.sqlite3"
+        calculate_monthly_usage(self.root, self.config, period_cache=cache)
+        added = self.write(log(["2026-01-02 00:00:00", "2026-01-02 00:01:00"]), name="TUBE01_b.csv")
+        with patch("gas_usage.read_flow_csv", wraps=read_flow_csv) as reader:
+            result = calculate_monthly_usage(self.root, self.config, period_cache=cache)
+        self.assertEqual([c.args[0].name for c in reader.call_args_list], [added.name])
+        self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], 2)
+        added.unlink()
+        result = calculate_monthly_usage(self.root, self.config, period_cache=cache)
+        self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], 1)
+
+    def test_flow_change_invalidates_only_changed_file_and_config_change_recalculates(self):
+        from gas_usage import read_flow_csv
+        times = ["2026-01-01 00:00:00", "2026-01-01 00:01:00"]
+        self.write(log(times), name="TUBE01_a.csv")
+        self.write(log(times,tube=2), name="TUBE02_a.csv")
+        cache = self.root / "cache.sqlite3"
+        calculate_monthly_usage(self.root, self.config, period_cache=cache)
+        self.write(log(times,n2=CM3_PER_FT3*2),name="TUBE01_a.csv")
+        with patch("gas_usage.read_flow_csv", wraps=read_flow_csv) as reader:
+            changed = calculate_monthly_usage(self.root,self.config,period_cache=cache)
+        self.assertEqual([c.args[0].name for c in reader.call_args_list],["TUBE01_a.csv"])
+        self.assertAlmostEqual(changed.monthly.iloc[0]["N2 (ft³)"],3)
+        limited = calculate_monthly_usage(self.root,GasUsageConfig("2026-01","2026-02",max_gap_seconds=30),period_cache=cache)
+        self.assertTrue(limited.tubes["N2 (ft³)"].isna().all())
+
+    @unittest.skipUnless(os.name == "nt", "Windows resource scheduling")
+    def test_background_priority_is_restored_even_when_work_fails(self):
+        import ctypes
+        import threading
+        from ctypes import wintypes
+        from background_work import background_resources
+        observations = []
+        def work():
+            kernel=ctypes.WinDLL("kernel32")
+            kernel.GetCurrentThread.restype=wintypes.HANDLE
+            kernel.GetThreadPriority.argtypes=[wintypes.HANDLE]
+            kernel.GetThreadPriority.restype=ctypes.c_int
+            handle=kernel.GetCurrentThread()
+            before=kernel.GetThreadPriority(handle)
+            try:
+                with background_resources() as enabled:
+                    observations.append(enabled)
+                    raise RuntimeError("simulated failure")
+            except RuntimeError:
+                pass
+            observations.append(kernel.GetThreadPriority(handle)==before)
+        thread=threading.Thread(target=work)
+        thread.start()
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(observations,[True,True])
+
     def test_month_export_slices_range_without_mutating_original(self):
         self.write(log(["2026-01-31 23:59:30", "2026-02-01 00:00:30"]))
         result = self.result()
