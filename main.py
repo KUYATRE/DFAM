@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import pandas as pd
 from step_statistics import calculate_step_statistics, StepStatisticsDialog
 from reference_comparison import ReferenceComparisonDialog
+from gas_usage_dialog import GasUsageDialog
 
 from PySide6.QtGui import (
     QIcon, QAction, QPainter, QColor, QPen, QCursor, QBrush, QPainterPath
@@ -3067,6 +3068,12 @@ class CsvPlotPanel(QWidget):
         apply_shadow(self.btn_history, blur=18, y_offset=3)
         title_row.addWidget(self.btn_history, 0)
 
+        self.btn_gas_usage = QPushButton("Monthly Gas Usage")
+        self.btn_gas_usage.setToolTip("Tube별 / 설비 전체 월별 N2·O2 사용량 (ft³)")
+        self.btn_gas_usage.clicked.connect(self.show_gas_usage)
+        self.btn_gas_usage.setStyleSheet(toolbar_btn_css)
+        title_row.addWidget(self.btn_gas_usage, 0)
+
         self.btn_step_stats = QPushButton("Step Statistics")
         self.btn_step_stats.setEnabled(False)
         self.btn_step_stats.setToolTip("Show step durations and sensor statistics for the loaded CSV")
@@ -3270,6 +3277,14 @@ class CsvPlotPanel(QWidget):
         root.addWidget(self.status)
 
         apply_chrome_input_styles(self)
+
+    def show_gas_usage(self):
+        dlg = GasUsageDialog(self.root_dir, self)
+        apply_chrome_input_styles(dlg)
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()
 
     def show_step_statistics(self):
         if self.df is None or self.csv_path is None:
@@ -4773,7 +4788,7 @@ class MainWindow(QMainWindow):
 
         self._load_app_settings()
 
-        self.setWindowTitle("Log Plotter")
+        self.setWindowTitle("Log Plotter v3.00")
 
         screen = QApplication.primaryScreen()
         geo = screen.availableGeometry()
