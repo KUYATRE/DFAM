@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 
 import pandas as pd
+from step_statistics import calculate_step_statistics, StepStatisticsDialog
+from reference_comparison import ReferenceComparisonDialog
 
 from PySide6.QtGui import (
     QIcon, QAction, QPainter, QColor, QPen, QCursor, QBrush, QPainterPath
@@ -2921,6 +2923,29 @@ class TreeFilterProxyModel(QSortFilterProxyModel):
         self._filter_text = (text or "").strip().lower()
         self.invalidate()
 
+    def lessThan(self, left, right):
+        model = self.sourceModel()
+        if not isinstance(model, QFileSystemModel):
+            return super().lessThan(left, right)
+
+        if left.column() == 3:
+            # Compare timestamps, not locale-dependent date display strings.
+            left_time = model.fileInfo(left).lastModified().toMSecsSinceEpoch()
+            right_time = model.fileInfo(right).lastModified().toMSecsSinceEpoch()
+            if left_time != right_time:
+                return left_time < right_time
+        elif left.column() != 0:
+            return super().lessThan(left, right)
+
+        # Natural filename order also breaks ties between identical timestamps.
+        def name_key(index):
+            name = model.fileName(index)
+            parts = tuple(int(part) if part.isdecimal() else part
+                          for part in re.split(r"(\d+)", name.casefold()))
+            return parts, name
+
+        return name_key(left) < name_key(right)
+
     def filterAcceptsRow(self, source_row, source_parent):
         if not self._filter_text:
             return True
@@ -3041,6 +3066,13 @@ class CsvPlotPanel(QWidget):
         self.btn_history.setStyleSheet(toolbar_btn_css)
         apply_shadow(self.btn_history, blur=18, y_offset=3)
         title_row.addWidget(self.btn_history, 0)
+
+        self.btn_step_stats = QPushButton("Step Statistics")
+        self.btn_step_stats.setEnabled(False)
+        self.btn_step_stats.setToolTip("Show step durations and sensor statistics for the loaded CSV")
+        self.btn_step_stats.clicked.connect(self.show_step_statistics)
+        self.btn_step_stats.setStyleSheet(toolbar_btn_css)
+        title_row.addWidget(self.btn_step_stats, 0)
 
         self.btn_reset_zoom = QPushButton("Reset Zoom")
         self.btn_reset_zoom.setEnabled(False)
@@ -3238,6 +3270,39 @@ class CsvPlotPanel(QWidget):
         root.addWidget(self.status)
 
         apply_chrome_input_styles(self)
+
+    def show_step_statistics(self):
+        if self.df is None or self.csv_path is None:
+            return
+        try:
+            result = calculate_step_statistics(
+                self.df, self.df.columns[0], self._step_no_col, self._step_name_col,
+            )
+        except Exception as exc:
+            QMessageBox.information(self, "Step Statistics", str(exc))
+            return
+        dlg = StepStatisticsDialog(result, self.csv_path, self)
+        dlg.compareRequested.connect(lambda: self.show_reference_comparison(result, dlg))
+        apply_chrome_input_styles(dlg)
+        dlg.exec()
+
+    @staticmethod
+    def _load_statistics_for_comparison(path):
+        df, _ = CsvPlotPanel.read_csv_with_fallback(path)
+        df = CsvPlotPanel._normalize_columns(df)
+        if df.empty:
+            raise ValueError('분석할 로그 데이터가 없습니다.')
+        step_col = CsvPlotPanel._detect_step_no_column_in_df(df)
+        name_col = CsvPlotPanel._detect_step_name_column_in_df(df)
+        if step_col is None or step_col == name_col:
+            raise ValueError('기준 로그에서 Step 번호 컬럼을 찾을 수 없습니다.')
+        return calculate_step_statistics(df, df.columns[0], step_col, name_col)
+
+    def show_reference_comparison(self, target_statistics, parent=None):
+        dlg = ReferenceComparisonDialog(target_statistics, self.csv_path,
+                                        self._load_statistics_for_comparison, parent or self)
+        apply_chrome_input_styles(dlg)
+        dlg.exec()
 
     def request_history_for_area(self, area: PlotArea):
         self.historyRequested.emit(area)
@@ -3948,6 +4013,7 @@ class CsvPlotPanel(QWidget):
 
     def load_csv(self, path: str | Path):
         path = Path(path)
+        self.btn_step_stats.setEnabled(False)
         self.csv_path = path
         self._mode = "single"
         for a in self._areas:
@@ -3973,6 +4039,7 @@ class CsvPlotPanel(QWidget):
         df = self._normalize_columns(df)
         self.df = df
         self._detect_step_columns()
+        self.btn_step_stats.setEnabled(self._step_no_col is not None)
 
         self.x_col = df.columns[0]
         x_series = df[self.x_col]
@@ -4999,12 +5066,12 @@ def main():
     app.setWindowIcon(QIcon(icon_path))
     app.setStyleSheet(build_app_stylesheet())
 
-    root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
-    # root_dir = r"C:\hmi\System\RecipeProcLog"
-    alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
-    # alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
-    history_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\RecipeHistoryLog"
-    # history_dir = r"C:\hmi\System\RecipeHistoryLog"
+    # root_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그"
+    root_dir = r"C:\hmi\System\RecipeProcLog"
+    # alarm_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\AlarmHistoryLog"
+    alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
+    # history_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\RecipeHistoryLog"
+    history_dir = r"C:\hmi\System\RecipeHistoryLog"
 
     win = MainWindow(
         root_dir=root_dir,
@@ -5013,6 +5080,8 @@ def main():
     )
     win.setWindowIcon(QIcon(icon_path))
     win.show()
+
+    win.setWindowIcon(QIcon(icon_path))
 
     rc = app.exec()
     logger.info(f"[APP] exit code={rc}")

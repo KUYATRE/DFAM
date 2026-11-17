@@ -1,0 +1,27 @@
+# Python environments and caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Generated builds, runtime logs, and local input data
+/build/
+/dist/
+logs/
+*.log
+/data/
+
+# Personal IDE settings and secrets
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
+Thumbs.db
+.DS_Store
