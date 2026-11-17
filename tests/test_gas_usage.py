@@ -124,7 +124,35 @@ class GasUsageTests(unittest.TestCase):
     def test_timestamp_gaps_bad_rows_and_files_are_not_bridged(self):
         self.write(log(["2026-01-01 00:00:00", "bad", "2026-01-01 00:01:00", "2026-01-01 00:03:00"]))
         self.write(log(["2026-01-01 00:04:00", "2026-01-01 00:05:00"]), name="TUBE01_second.csv")
-        self.assertAlmostEqual(self.result().tubes.iloc[0]["N2 (ft³)"], 1)
+        limited = self.result(GasUsageConfig("2026-01", "2026-02", max_gap_seconds=60))
+        self.assertAlmostEqual(limited.tubes.iloc[0]["N2 (ft³)"], 1)
+        self.assertTrue(limited.issues["Issue"].str.contains("60초 초과").any())
+
+    def test_same_duration_at_one_thirty_and_120_second_cadences(self):
+        for interval in (1, 30, 120):
+            with self.subTest(interval=interval):
+                times = pd.date_range("2026-01-01", periods=240 // interval + 1, freq=f"{interval}s")
+                self.write(log(times.astype(str)))
+                result = self.result()
+                self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 4)
+                self.assertAlmostEqual(result.tubes.iloc[0]["N2 recorded (h)"], 240 / 3600)
+                self.assertEqual(result.settings.set_index("Setting").loc["Maximum gap (s)", "Value"], "Unlimited")
+
+    def test_mixed_cadences_integrate_a_linear_ramp_using_actual_seconds(self):
+        elapsed = np.array([0, 1, 31, 121, 240])
+        times = pd.Timestamp("2026-01-01") + pd.to_timedelta(elapsed, unit="s")
+        self.write(log(times.astype(str), n2=CM3_PER_FT3 * elapsed / 240))
+        row = self.result().tubes.iloc[0]
+        self.assertAlmostEqual(row["N2 (ft³)"], 2)
+        self.assertAlmostEqual(row["O2 (ft³)"], 4)
+
+    def test_long_interval_crossing_month_boundary_is_split_by_elapsed_time(self):
+        self.write(log(["2026-01-31 23:59:00", "2026-02-01 00:02:00"],
+                       n2=[0, 3 * CM3_PER_FT3]))
+        result = self.result()
+        self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 0.5)
+        self.assertAlmostEqual(result.tubes.iloc[1]["N2 (ft³)"], 4)
+        self.assertAlmostEqual(result.tubes["N2 recorded (h)"].sum(), 180 / 3600)
 
     def test_numeric_time_and_backwards_time_are_not_calendar_intervals(self):
         self.write(log([0, 60]))
@@ -264,18 +292,32 @@ class GasUsageUiTests(unittest.TestCase):
                 dialog.deleteLater()
                 QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
-    def test_dashboard_uses_current_panel_root_directory(self):
+    def test_dashboard_uses_proc_log_directory_independent_of_root(self):
         from main import CsvPlotPanel
         panel = CsvPlotPanel(Path("."))
         panel.root_dir = Path("chosen_process_logs")
+        panel.proc_log_dir = Path("separate_gas_logs")
         try:
             with patch("main.GasUsageDialog") as dialog, patch("main.apply_chrome_input_styles"):
                 panel.btn_gas_usage.click()
-                dialog.assert_called_once_with(panel.root_dir, panel)
+                dialog.assert_called_once_with(panel.proc_log_dir, panel)
                 dialog.return_value.exec.assert_called_once()
         finally:
             panel.close()
             panel.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    def test_legacy_default_gap_is_removed_but_new_explicit_limit_is_loaded(self):
+        with tempfile.TemporaryDirectory() as folder:
+            settings = QSettings(str(Path(folder) / "ui.ini"), QSettings.IniFormat)
+            settings.setValue("gap", 60)
+            dialog = GasUsageDialog(folder, settings=settings)
+            self.assertEqual(dialog.gap.value(), 0)
+            dialog.deleteLater()
+            settings.setValue("gap_limit_seconds", 120)
+            restored = GasUsageDialog(folder, settings=settings)
+            self.assertEqual(restored.gap.value(), 120)
+            restored.deleteLater()
             QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
     def test_selected_month_cards_do_not_narrow_the_period_trend(self):

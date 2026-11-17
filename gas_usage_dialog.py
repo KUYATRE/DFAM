@@ -46,9 +46,9 @@ class GasUsageWorker(QThread):
 
 
 class GasUsageDialog(QDialog):
-    def __init__(self, root_dir, parent=None, settings=None):
+    def __init__(self, proc_log_dir, parent=None, settings=None):
         super().__init__(parent)
-        self.setWindowTitle("MONTHLY GAS FLOW · v3.01")
+        self.setWindowTitle("MONTHLY GAS FLOW · v3.02")
         self.resize(1180, 940)
         self.settings = settings if settings is not None else QSettings("DFAM", "GasUsage")
         self.result = None
@@ -115,17 +115,18 @@ class GasUsageDialog(QDialog):
         toolbar.addWidget(self.export_button)
         controls.addLayout(toolbar)
 
-        group = QGroupBox("공정 로그 경로 및 실측 sccm 컬럼")
+        group = QGroupBox("가스 집계용 ProcLog 경로 및 실측 sccm 컬럼")
         group.setVisible(False)
         self.settings_toggle.toggled.connect(group.setVisible)
         form = QFormLayout(group)
         path_row = QHBoxLayout()
-        self.root_edit = QLineEdit(str(root_dir or ""))
+        self.root_edit = QLineEdit(str(proc_log_dir or ""))
+        self.root_edit.setToolTip("기본 경로는 메인 Settings의 Proc log dir (Gas usage)에서 저장합니다.")
         path_row.addWidget(self.root_edit, 1)
         browse = QPushButton("폴더 선택")
         browse.clicked.connect(self.browse)
         path_row.addWidget(browse)
-        form.addRow("공정 로그 폴더", path_row)
+        form.addRow("ProcLog 폴더", path_row)
         self.n2_edit = QLineEdit(self.settings.value("n2", ", ".join(DEFAULT_N2), type=str))
         self.o2_edit = QLineEdit(self.settings.value("o2", ", ".join(DEFAULT_O2), type=str))
         for edit in (self.n2_edit, self.o2_edit):
@@ -137,12 +138,16 @@ class GasUsageDialog(QDialog):
         self.time_edit.setMaximumWidth(140)
         extra.addWidget(QLabel("시간 컬럼"))
         extra.addWidget(self.time_edit)
-        extra.addWidget(QLabel("허용 기록 간격"))
+        extra.addWidget(QLabel("기록 간격 상한 (선택)"))
         self.gap = QDoubleSpinBox()
-        self.gap.setRange(0.001, 86400)
+        self.gap.setRange(0, 86400)
         self.gap.setDecimals(3)
         self.gap.setSuffix(" s")
-        self.gap.setValue(self.settings.value("gap", 60.0, type=float))
+        self.gap.setSpecialValueText("제한 없음")
+        self.gap.setToolTip("앞뒤 시각 차이로 적산합니다. 간격 상한을 지정한 경우에만 더 긴 구간을 제외합니다.")
+        # v3.01 wrote a default 60-second cap under 'gap'. Do not carry that
+        # implicit cap into interval-aware accounting; new explicit limits persist.
+        self.gap.setValue(self.settings.value("gap_limit_seconds", 0.0, type=float))
         extra.addWidget(self.gap)
         extra.addStretch()
         defaults = QPushButton("기본값 복원")
@@ -316,7 +321,7 @@ class GasUsageDialog(QDialog):
         self.n2_edit.setText(", ".join(DEFAULT_N2))
         self.o2_edit.setText(", ".join(DEFAULT_O2))
         self.time_edit.setText("Time")
-        self.gap.setValue(60)
+        self.gap.setValue(0)
 
     def browse(self):
         path = QFileDialog.getExistingDirectory(self, "공정 로그 폴더", self.root_edit.text())
@@ -344,7 +349,7 @@ class GasUsageDialog(QDialog):
             self.month_from.date().toString("yyyy-MM"), self.month_to.date().toString("yyyy-MM"),
             tuple(s.strip() for s in self.n2_edit.text().split(",") if s.strip()),
             tuple(s.strip() for s in self.o2_edit.text().split(",") if s.strip()),
-            self.time_edit.text().strip(), self.gap.value())
+            self.time_edit.text().strip(), self.gap.value() or None)
         try:
             config.validate()
             if not Path(self.root_edit.text().strip()).is_dir() or not self.root_edit.text().strip():
@@ -359,7 +364,7 @@ class GasUsageDialog(QDialog):
         self.progress.setRange(0, 0)
         self.status.setText("공정 로그를 찾고 있습니다…")
         for key, value in (("n2", self.n2_edit.text()), ("o2", self.o2_edit.text()),
-                           ("time", self.time_edit.text()), ("gap", self.gap.value())):
+                           ("time", self.time_edit.text()), ("gap_limit_seconds", self.gap.value())):
             self.settings.setValue(key, value)
         self.worker = GasUsageWorker(self.root_edit.text().strip(), config, self)
         self.worker.progress.connect(self.update_progress)

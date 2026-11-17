@@ -30,7 +30,7 @@ class GasUsageConfig:
     n2_columns: tuple[str, ...] = DEFAULT_N2
     o2_columns: tuple[str, ...] = DEFAULT_O2
     time_column: str = "Time"
-    max_gap_seconds: float = 60.0
+    max_gap_seconds: float | None = None
 
     def validate(self):
         start, end = pd.Period(self.start_month, "M"), pd.Period(self.end_month, "M")
@@ -38,7 +38,7 @@ class GasUsageConfig:
             raise ValueError("시작 월은 종료 월보다 늦을 수 없습니다.")
         if end.ordinal - start.ordinal > 119:
             raise ValueError("한 번에 최대 120개월까지 집계할 수 있습니다.")
-        if not np.isfinite(self.max_gap_seconds) or self.max_gap_seconds <= 0:
+        if self.max_gap_seconds is not None and (not np.isfinite(self.max_gap_seconds) or self.max_gap_seconds <= 0):
             raise ValueError("허용 기록 간격은 0보다 큰 초 단위 값이어야 합니다.")
         if not self.time_column.strip():
             raise ValueError("시간 컬럼을 지정하세요.")
@@ -137,8 +137,10 @@ def flow_intervals(df, path, tube, config, issues):
     seconds = np.zeros(len(df) - 1)
     seconds[pair] = (ns[1:][pair] - ns[:-1][pair]) / 1e9
     issue("중복 또는 역행 시각 구간 제외", (pair & (seconds <= 0)).sum())
-    issue(f"{config.max_gap_seconds:g}초 초과 기록 간격 제외", (pair & (seconds > config.max_gap_seconds)).sum())
-    valid = pair & (seconds > 0) & (seconds <= config.max_gap_seconds)
+    valid = pair & (seconds > 0)
+    if config.max_gap_seconds is not None:
+        issue(f"{config.max_gap_seconds:g}초 초과 기록 간격 제외", (pair & (seconds > config.max_gap_seconds)).sum())
+        valid &= seconds <= config.max_gap_seconds
     bounds = (pd.Period(config.start_month, "M").start_time.value,
               (pd.Period(config.end_month, "M") + 1).start_time.value)
     valid &= (ns[:-1] < bounds[1]) & (ns[1:] > bounds[0])
@@ -272,7 +274,8 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
     settings = pd.DataFrame([
         ["Root", str(root.resolve())], ["Months", f"{config.start_month} ~ {config.end_month}"],
         ["Time", config.time_column], ["N2 sccm columns", ", ".join(config.n2_columns)],
-        ["O2 sccm columns", ", ".join(config.o2_columns)], ["Maximum gap (s)", config.max_gap_seconds],
+        ["O2 sccm columns", ", ".join(config.o2_columns)],
+        ["Maximum gap (s)", "Unlimited" if config.max_gap_seconds is None else config.max_gap_seconds],
         ["Formula", "sum((q0+q1)/2 * seconds/60) / 28316.846592"],
         ["Volume basis", "ft³ at the same standard conditions as the source sccm; no T/P correction"],
         ["Scope", "Recorded process intervals only; excludes unlogged idle/purge usage and final-sample extrapolation"],

@@ -53,6 +53,7 @@ except Exception:
     logger = _Dummy()
 
 NONE_ITEM = "(None)"
+DEFAULT_PROC_LOG_DIR = r"C:\hmi\System\ProcLog"
 
 
 @dataclass(frozen=True)
@@ -120,21 +121,28 @@ class DateRangeDialog(QDialog):
 
 
 class AppSettingsDialog(QDialog):
-    def __init__(self, root_dir: str = "", alarm_dir: str = "", history_dir: str = "", parent=None):
+    def __init__(self, root_dir: str = "", alarm_dir: str = "", history_dir: str = "", parent=None,
+                 *, proc_log_dir: str = DEFAULT_PROC_LOG_DIR):
         super().__init__(parent)
         self.setWindowTitle("Settings")
+        self.resize(820, 300)
 
         self.root_edit = QLineEdit(root_dir)
         self.alarm_edit = QLineEdit(alarm_dir)
         self.history_edit = QLineEdit(history_dir)
+        self.proc_log_edit = QLineEdit(proc_log_dir)
+        self.proc_log_edit.setPlaceholderText(DEFAULT_PROC_LOG_DIR)
+        self.proc_log_edit.setToolTip("월별 가스 사용량 집계 전용 폴더입니다. 집계할 때 폴더의 존재 여부를 확인합니다.")
 
         self.root_btn = QPushButton("Browse...")
         self.alarm_btn = QPushButton("Browse...")
         self.history_btn = QPushButton("Browse...")
+        self.proc_log_btn = QPushButton("Browse...")
 
         self.root_btn.clicked.connect(lambda: self._pick_dir(self.root_edit))
         self.alarm_btn.clicked.connect(lambda: self._pick_dir(self.alarm_edit))
         self.history_btn.clicked.connect(lambda: self._pick_dir(self.history_edit))
+        self.proc_log_btn.clicked.connect(lambda: self._pick_dir(self.proc_log_edit))
 
         form = QFormLayout()
 
@@ -152,6 +160,11 @@ class AppSettingsDialog(QDialog):
         row3.addWidget(self.history_edit, 1)
         row3.addWidget(self.history_btn, 0)
         form.addRow("History dir", row3)
+
+        row4 = QHBoxLayout()
+        row4.addWidget(self.proc_log_edit, 1)
+        row4.addWidget(self.proc_log_btn, 0)
+        form.addRow("Proc log dir (Gas usage)", row4)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self._on_accept)
@@ -173,6 +186,7 @@ class AppSettingsDialog(QDialog):
         root_dir = self.root_edit.text().strip()
         alarm_dir = self.alarm_edit.text().strip()
         history_dir = self.history_edit.text().strip()
+        proc_log_dir = self.proc_log_edit.text().strip()
 
         if not root_dir:
             QMessageBox.warning(self, "Settings", "root_dir를 입력해줘.")
@@ -189,6 +203,13 @@ class AppSettingsDialog(QDialog):
             QMessageBox.warning(self, "Settings", "history_dir 경로가 존재하지 않아.")
             return
 
+        if not proc_log_dir:
+            QMessageBox.warning(self, "Settings", "가스 집계용 Proc log dir를 입력하세요.")
+            return
+        if Path(proc_log_dir).exists() and not Path(proc_log_dir).is_dir():
+            QMessageBox.warning(self, "Settings", "Proc log dir에는 파일이 아닌 폴더를 지정하세요.")
+            return
+
         self.accept()
 
     def values(self):
@@ -196,6 +217,7 @@ class AppSettingsDialog(QDialog):
             self.root_edit.text().strip(),
             self.alarm_edit.text().strip(),
             self.history_edit.text().strip(),
+            self.proc_log_edit.text().strip(),
         )
 
 
@@ -2978,10 +3000,12 @@ class CsvPlotPanel(QWidget):
     historyRequested = Signal(object)
     exportRequested = Signal(object)
 
-    def __init__(self, alarm_dir: Path, history_dir: Path | None = None, parent=None):
+    def __init__(self, alarm_dir: Path, history_dir: Path | None = None, parent=None,
+                 *, proc_log_dir: str | Path = DEFAULT_PROC_LOG_DIR):
         super().__init__(parent)
 
         self.root_dir: Path | None = None
+        self.proc_log_dir = Path(proc_log_dir).resolve()
         self.history_dir: Path | None = Path(history_dir).resolve() if history_dir else None
 
         self._history_df_cache: pd.DataFrame | None = None
@@ -3279,7 +3303,7 @@ class CsvPlotPanel(QWidget):
         apply_chrome_input_styles(self)
 
     def show_gas_usage(self):
-        dlg = GasUsageDialog(self.root_dir, self)
+        dlg = GasUsageDialog(self.proc_log_dir, self)
         apply_chrome_input_styles(dlg)
         try:
             dlg.exec()
@@ -4780,15 +4804,17 @@ class CsvPlotPanel(QWidget):
 # MainWindow
 # =========================================================
 class MainWindow(QMainWindow):
-    def __init__(self, root_dir: str | Path, alarm_dir: str | Path, history_dir: str | Path):
+    def __init__(self, root_dir: str | Path, alarm_dir: str | Path, history_dir: str | Path,
+                 proc_log_dir: str | Path = DEFAULT_PROC_LOG_DIR):
         super().__init__()
         self.root_dir = Path(root_dir).resolve()
         self.alarm_dir = Path(alarm_dir).resolve()
         self.history_dir = Path(history_dir).resolve()
+        self.proc_log_dir = Path(proc_log_dir).resolve()
 
         self._load_app_settings()
 
-        self.setWindowTitle("Log Plotter v3.01")
+        self.setWindowTitle("Log Plotter v3.02")
 
         screen = QApplication.primaryScreen()
         geo = screen.availableGeometry()
@@ -4892,8 +4918,8 @@ class MainWindow(QMainWindow):
         self.plot_panel = CsvPlotPanel(
             alarm_dir=self.alarm_dir,
             history_dir=self.history_dir,
+            proc_log_dir=self.proc_log_dir,
         )
-        self.plot_panel.root_dir = self.root_dir
         self.plot_panel.root_dir = self.root_dir
         self.plot_panel.historyRequested.connect(self.on_history_requested)
         self.plot_panel.exportRequested.connect(self.on_export_requested)
@@ -4915,6 +4941,7 @@ class MainWindow(QMainWindow):
         root_dir = settings.value("paths/root_dir", str(self.root_dir), type=str)
         alarm_dir = settings.value("paths/alarm_dir", str(self.alarm_dir), type=str)
         history_dir = settings.value("paths/history_dir", str(self.history_dir), type=str)
+        proc_log_dir = settings.value("paths/proc_log_dir", str(self.proc_log_dir), type=str).strip()
 
         if root_dir and Path(root_dir).exists():
             self.root_dir = Path(root_dir).resolve()
@@ -4925,11 +4952,17 @@ class MainWindow(QMainWindow):
         if history_dir and Path(history_dir).exists():
             self.history_dir = Path(history_dir).resolve()
 
+        # Keep the user's gas source even while its drive/folder is unavailable.
+        # Never silently substitute the recipe log folder for gas accounting.
+        if proc_log_dir:
+            self.proc_log_dir = Path(proc_log_dir).resolve()
+
     def _save_app_settings(self):
         settings = QSettings("DFAM", "LogPlotter")
         settings.setValue("paths/root_dir", str(self.root_dir))
         settings.setValue("paths/alarm_dir", str(self.alarm_dir))
         settings.setValue("paths/history_dir", str(self.history_dir))
+        settings.setValue("paths/proc_log_dir", str(self.proc_log_dir))
         settings.sync()
 
     def reload_tree_root(self):
@@ -4948,6 +4981,7 @@ class MainWindow(QMainWindow):
         self.plot_panel.root_dir = self.root_dir
         self.plot_panel.alarm_dir = self.alarm_dir
         self.plot_panel.history_dir = self.history_dir
+        self.plot_panel.proc_log_dir = self.proc_log_dir
 
         self.plot_panel._history_df_cache = None
         self.plot_panel._history_cache_root = None
@@ -4958,16 +4992,18 @@ class MainWindow(QMainWindow):
             root_dir=str(self.root_dir),
             alarm_dir=str(self.alarm_dir),
             history_dir=str(self.history_dir),
+            proc_log_dir=str(self.proc_log_dir),
             parent=self,
         )
         if dlg.exec() != QDialog.Accepted:
             return
 
-        root_dir, alarm_dir, history_dir = dlg.values()
+        root_dir, alarm_dir, history_dir, proc_log_dir = dlg.values()
 
         self.root_dir = Path(root_dir).resolve()
         self.alarm_dir = Path(alarm_dir).resolve() if alarm_dir else Path(".").resolve()
         self.history_dir = Path(history_dir).resolve() if history_dir else Path(".").resolve()
+        self.proc_log_dir = Path(proc_log_dir).resolve()
 
         self._save_app_settings()
         self.reload_tree_root()
@@ -5087,11 +5123,13 @@ def main():
     alarm_dir = r"C:\hmi\System\AlarmHistoryLog"
     # history_dir = r"D:\01. 업무자료\01. PROJECT\00. 개인PJT\02. 공정로그 및 알람 분석\02. 테스트로그\RecipeHistoryLog"
     history_dir = r"C:\hmi\System\RecipeHistoryLog"
+    proc_log_dir = DEFAULT_PROC_LOG_DIR  # 월별 가스 사용량 집계 전용 로그 경로
 
     win = MainWindow(
         root_dir=root_dir,
         alarm_dir=alarm_dir,
         history_dir=history_dir,
+        proc_log_dir=proc_log_dir,
     )
     win.setWindowIcon(QIcon(icon_path))
     win.show()
