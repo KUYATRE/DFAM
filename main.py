@@ -4788,7 +4788,7 @@ class MainWindow(QMainWindow):
 
         self._load_app_settings()
 
-        self.setWindowTitle("Log Plotter v3.00")
+        self.setWindowTitle("Log Plotter v3.01")
 
         screen = QApplication.primaryScreen()
         geo = screen.availableGeometry()

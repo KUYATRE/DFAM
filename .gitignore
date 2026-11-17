@@ -16,6 +16,7 @@ htmlcov/
 logs/
 *.log
 /data/
+/upload/
 
 # Personal IDE settings and secrets
 .idea/

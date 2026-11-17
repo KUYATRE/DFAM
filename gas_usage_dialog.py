@@ -9,9 +9,12 @@ from PySide6.QtCharts import QBarCategoryAxis, QBarSeries, QBarSet, QChart, QCha
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDateEdit, QDialog, QDoubleSpinBox,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMessageBox, QProgressBar, QPushButton, QSplitter,
+    QLineEdit, QMessageBox, QProgressBar, QPushButton,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QFrame, QGridLayout, QScrollArea,
 )
+
+from gas_usage_cards import TubeUsageCard, volume_text
 
 from gas_usage import (
     CalculationCancelled, DEFAULT_N2, DEFAULT_O2, GasUsageConfig,
@@ -45,60 +48,84 @@ class GasUsageWorker(QThread):
 class GasUsageDialog(QDialog):
     def __init__(self, root_dir, parent=None, settings=None):
         super().__init__(parent)
-        self.setWindowTitle("Monthly Gas Usage · v3.00")
-        self.resize(1250, 900)
+        self.setWindowTitle("MONTHLY GAS FLOW · v3.01")
+        self.resize(1180, 940)
         self.settings = settings if settings is not None else QSettings("DFAM", "GasUsage")
         self.result = None
         self.worker = None
         self._close_when_finished = False
+        self.tube_cards = {}
+        self._card_signature = None
+        self.setObjectName("gasUsageDialog")
+        self.setStyleSheet("QDialog#gasUsageDialog {background:#eaf0f4;}")
         layout = QVBoxLayout(self)
-        heading = QLabel("월별 가스 사용량")
-        heading.setStyleSheet("font-size:22px; font-weight:700; color:#123149; padding:4px;")
-        layout.addWidget(heading)
-        note = QLabel("Tube별 N2 · O2 실측 유량을 적산합니다. 단위: ft³ (원본 sccm과 동일한 표준상태).\n"
-                      "설비 전체 = Tube 합계 · 로그가 없는 대기/퍼지 사용량은 포함되지 않습니다.")
-        note.setWordWrap(True)
-        layout.addWidget(note)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(9)
+
+        banner = QFrame()
+        banner.setObjectName("gasBanner")
+        banner.setStyleSheet("QFrame#gasBanner {background:#233341; border:0;} QFrame#gasBanner QLabel {color:white; background:transparent;}")
+        header = QHBoxLayout(banner)
+        header.setContentsMargins(20, 13, 20, 13)
+        title = QLabel("MONTHLY GAS FLOW")
+        title.setStyleSheet("font-size:24px; font-weight:700;")
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(QLabel("SELECT MONTH"))
+        today = QDate.currentDate()
+        self.selected_month = QDateEdit(QDate(today.year(), today.month(), 1))
+        self.selected_month.setDisplayFormat("yyyy-MM")
+        self.selected_month.setCalendarPopup(True)
+        self.selected_month.setMinimumWidth(135)
+        header.addWidget(self.selected_month)
+        layout.addWidget(banner)
 
         self.controls = QWidget()
         controls = QVBoxLayout(self.controls)
         controls.setContentsMargins(0, 0, 0, 0)
-        path_row = QHBoxLayout()
-        path_row.addWidget(QLabel("공정 로그 폴더"))
-        self.root_edit = QLineEdit(str(root_dir or ""))
-        self.root_edit.setPlaceholderText(r"C:\hmi\System\RecipeProcLog")
-        path_row.addWidget(self.root_edit, 1)
-        browse = QPushButton("폴더 선택")
-        browse.clicked.connect(self.browse)
-        path_row.addWidget(browse)
-        controls.addLayout(path_row)
-
-        options = QHBoxLayout()
-        today = QDate.currentDate()
+        controls.setSpacing(6)
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(QLabel("조회 기간"))
         self.month_from, self.month_to = QDateEdit(), QDateEdit()
         for edit, date in ((self.month_from, QDate(today.year(), 1, 1)),
                            (self.month_to, QDate(today.year(), today.month(), 1))):
             edit.setDisplayFormat("yyyy-MM")
             edit.setCalendarPopup(True)
             edit.setDate(date)
-        options.addWidget(QLabel("집계 월"))
-        options.addWidget(self.month_from)
-        options.addWidget(QLabel("~"))
-        options.addWidget(self.month_to)
-        options.addStretch()
+            edit.setMinimumWidth(120)
+        toolbar.addWidget(self.month_from)
+        toolbar.addWidget(QLabel("~"))
+        toolbar.addWidget(self.month_to)
+        toolbar.addWidget(QLabel("설비"))
+        self.equipment_filter = QComboBox()
+        self.equipment_filter.addItem("전체 설비", None)
+        self.equipment_filter.setMinimumWidth(105)
+        toolbar.addWidget(self.equipment_filter)
+        toolbar.addStretch()
+        self.settings_toggle = QPushButton("경로 / 계산 설정")
+        self.settings_toggle.setCheckable(True)
+        toolbar.addWidget(self.settings_toggle)
         self.calculate_button = QPushButton("집계 / 새로고침")
-        self.calculate_button.setStyleSheet("background:#0f6cbd; color:white; padding:8px 20px; font-weight:700;")
+        self.calculate_button.setStyleSheet("background:#176596; color:white; font-weight:700; padding:8px 14px;")
         self.calculate_button.clicked.connect(self.start_calculation)
-        options.addWidget(self.calculate_button)
-        controls.addLayout(options)
+        toolbar.addWidget(self.calculate_button)
+        self.export_button = QPushButton("Excel 내보내기")
+        self.export_button.setEnabled(False)
+        self.export_button.clicked.connect(self.export)
+        toolbar.addWidget(self.export_button)
+        controls.addLayout(toolbar)
 
-        settings_toggle = QPushButton("유량 컬럼 · 계산 설정 보기")
-        settings_toggle.setCheckable(True)
-        controls.addWidget(settings_toggle)
-        group = QGroupBox("실측 sccm 컬럼을 확인하세요")
+        group = QGroupBox("공정 로그 경로 및 실측 sccm 컬럼")
         group.setVisible(False)
-        settings_toggle.toggled.connect(group.setVisible)
+        self.settings_toggle.toggled.connect(group.setVisible)
         form = QFormLayout(group)
+        path_row = QHBoxLayout()
+        self.root_edit = QLineEdit(str(root_dir or ""))
+        path_row.addWidget(self.root_edit, 1)
+        browse = QPushButton("폴더 선택")
+        browse.clicked.connect(self.browse)
+        path_row.addWidget(browse)
+        form.addRow("공정 로그 폴더", path_row)
         self.n2_edit = QLineEdit(self.settings.value("n2", ", ".join(DEFAULT_N2), type=str))
         self.o2_edit = QLineEdit(self.settings.value("o2", ", ".join(DEFAULT_O2), type=str))
         for edit in (self.n2_edit, self.o2_edit):
@@ -107,7 +134,7 @@ class GasUsageDialog(QDialog):
         form.addRow("O2 실측 sccm", self.o2_edit)
         extra = QHBoxLayout()
         self.time_edit = QLineEdit(self.settings.value("time", "Time", type=str))
-        self.time_edit.setMaximumWidth(160)
+        self.time_edit.setMaximumWidth(140)
         extra.addWidget(QLabel("시간 컬럼"))
         extra.addWidget(self.time_edit)
         extra.addWidget(QLabel("허용 기록 간격"))
@@ -116,7 +143,6 @@ class GasUsageDialog(QDialog):
         self.gap.setDecimals(3)
         self.gap.setSuffix(" s")
         self.gap.setValue(self.settings.value("gap", 60.0, type=float))
-        self.gap.setToolTip("이를 초과하는 인접 기록 간격은 추정하지 않고 제외합니다.")
         extra.addWidget(self.gap)
         extra.addStretch()
         defaults = QPushButton("기본값 복원")
@@ -126,7 +152,9 @@ class GasUsageDialog(QDialog):
         controls.addWidget(group)
         layout.addWidget(self.controls)
 
-        progress_row = QHBoxLayout()
+        self.progress_widget = QWidget()
+        progress_row = QHBoxLayout(self.progress_widget)
+        progress_row.setContentsMargins(0, 0, 0, 0)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
@@ -135,55 +163,31 @@ class GasUsageDialog(QDialog):
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_calculation)
         progress_row.addWidget(self.cancel_button)
-        layout.addLayout(progress_row)
-        self.status = QLabel("월과 컬럼을 확인한 뒤 집계를 시작하세요. 하위 폴더의 CSV도 포함합니다.")
+        layout.addWidget(self.progress_widget)
+        self.progress_widget.hide()
+        self.status = QLabel("조회 기간을 선택한 뒤 집계를 시작하세요. 카드의 월은 SELECT MONTH에서 변경합니다.")
         self.status.setWordWrap(True)
+        self.status.setStyleSheet("color:#526675; font-size:11px;")
         layout.addWidget(self.status)
 
-        filters = QHBoxLayout()
-        self.equipment_filter, self.tube_filter = QComboBox(), QComboBox()
-        self.equipment_filter.addItem("전체 설비", None)
-        self.tube_filter.addItem("설비 전체", None)
-        filters.addWidget(QLabel("설비"))
-        filters.addWidget(self.equipment_filter)
-        filters.addWidget(QLabel("그래프 / Tube 표"))
-        filters.addWidget(self.tube_filter)
-        filters.addStretch()
-        self.export_button = QPushButton("Excel 내보내기")
-        self.export_button.setEnabled(False)
-        self.export_button.clicked.connect(self.export)
-        filters.addWidget(self.export_button)
-        layout.addLayout(filters)
-        self.summary = QLabel("N2: —    O2: —    합계: —")
-        self.summary.setStyleSheet("font-size:18px; font-weight:700; color:#0f6cbd; padding:6px;")
-        layout.addWidget(self.summary)
-
-        splitter = QSplitter(Qt.Vertical)
-        self.chart = QChart()
-        self.chart.setMargins(QMargins(8, 4, 8, 4))
-        self.chart.setTitle("월별 N2 · O2 사용량 (ft³)")
-        self.chart_view = QChartView(self.chart)
-        self.chart_view.setRenderHint(QPainter.Antialiasing)
-        self.chart_view.setMinimumHeight(240)
-        splitter.addWidget(self.chart_view)
         self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("QTabWidget::pane {border:0; background:#eaf0f4;} QTabBar::tab {padding:9px 16px;} QTabBar::tab:selected {background:white; color:#164a70; font-weight:700;}")
+        self._build_monthly_page()
+        self._build_trend_page()
         self.equipment_table, self.tube_table, self.issues_table = (QTableWidget() for _ in range(3))
         for title, table in (("설비별 월 합계", self.equipment_table),
-                             ("Tube별 월 사용량", self.tube_table), ("검토 내역", self.issues_table)):
+                             ("Tube별 상세", self.tube_table), ("검토 내역", self.issues_table)):
             table.setEditTriggers(QAbstractItemView.NoEditTriggers)
             table.setAlternatingRowColors(True)
             table.setSelectionBehavior(QAbstractItemView.SelectRows)
             table.verticalHeader().hide()
             table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
             self.tabs.addTab(table, title)
-        splitter.addWidget(self.tabs)
-        splitter.setSizes([300, 250])
-        layout.addWidget(splitter, 1)
-        footnote = QLabel("— = 유효 기록 없음 (0 사용량과 구분) · 그래프 * = 가스 기록 누락 · h = 집계 시간, 설비 표는 Tube 시간 합계\n"
-                          "사다리꼴 적산: Σ[(앞 유량+뒤 유량)/2 × 경과초/60] ÷ 28,316.846592 · "
-                          "마지막 기록 이후와 파일 사이 공백은 추정하지 않습니다.")
-        footnote.setWordWrap(True)
-        layout.addWidget(footnote)
+        layout.addWidget(self.tabs, 1)
+        note = QLabel("단위 ft³ · 원본 sccm과 동일한 표준상태 · — = 유효 기록 없음 · 미기록 대기/퍼지 사용량 제외")
+        note.setStyleSheet("font-size:10px; color:#657582;")
+        note.setWordWrap(True)
+        layout.addWidget(note)
 
         for edit in (self.root_edit, self.n2_edit, self.o2_edit, self.time_edit):
             edit.textChanged.connect(self.invalidate)
@@ -192,6 +196,121 @@ class GasUsageDialog(QDialog):
         self.gap.valueChanged.connect(self.invalidate)
         self.equipment_filter.currentIndexChanged.connect(self.refresh_views)
         self.tube_filter.currentIndexChanged.connect(self.refresh_views)
+        self.selected_month.dateChanged.connect(self.refresh_monthly)
+        self.refresh_monthly()
+
+    def _build_monthly_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 9, 0, 0)
+        layout.setSpacing(9)
+        self.month_caption = QLabel()
+        self.month_caption.setStyleSheet("color:#526675; font-size:11px;")
+        layout.addWidget(self.month_caption)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("QScrollArea {background:transparent; border:0;}")
+        body = QWidget()
+        body.setStyleSheet("background:transparent;")
+        self.cards_layout = QGridLayout(body)
+        self.cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.cards_layout.setSpacing(12)
+        self.cards_layout.setColumnStretch(0, 1)
+        self.cards_layout.setColumnStretch(1, 1)
+        self.cards_layout.setAlignment(Qt.AlignTop)
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
+        footer = QFrame()
+        footer.setObjectName("gasTotals")
+        footer.setStyleSheet("QFrame#gasTotals {background:#233341; border:0;} QFrame#gasTotals QLabel {background:transparent; border:0;}")
+        totals = QHBoxLayout(footer)
+        totals.setContentsMargins(20, 17, 20, 17)
+        self.monthly_totals = {}
+        for gas, color in (("N2", "#94e89c"), ("O2", "#9ed7e8")):
+            name = QLabel(f"ALL TUBE {gas}")
+            name.setStyleSheet("font-size:18px; font-weight:700; color:white;")
+            value = QLabel("— ft³")
+            value.setStyleSheet(f"font-size:21px; font-weight:700; color:{color};")
+            totals.addWidget(name)
+            totals.addWidget(value, 1, Qt.AlignHCenter)
+            self.monthly_totals[gas] = value
+        layout.addWidget(footer)
+        self.tabs.addTab(page, "월별 Tube 현황")
+
+    def _build_trend_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        filters = QHBoxLayout()
+        filters.addWidget(QLabel("조회 기간 내 월별 사용량 변화"))
+        filters.addStretch()
+        filters.addWidget(QLabel("Tube"))
+        self.tube_filter = QComboBox()
+        self.tube_filter.addItem("설비 전체", None)
+        self.tube_filter.setMinimumWidth(130)
+        filters.addWidget(self.tube_filter)
+        layout.addLayout(filters)
+        self.summary = QLabel("N2: —    O2: —    합계: —")
+        self.summary.setStyleSheet("font-size:18px; font-weight:700; color:#176596; padding:8px;")
+        layout.addWidget(self.summary)
+        self.chart = QChart()
+        self.chart.setMargins(QMargins(8, 4, 8, 4))
+        self.chart.setTitle("조회 기간 내 월별 N2 · O2 사용량 (ft³)")
+        self.chart_view = QChartView(self.chart)
+        self.chart_view.setRenderHint(QPainter.Antialiasing)
+        self.chart_view.setMinimumHeight(250)
+        layout.addWidget(self.chart_view, 1)
+        note = QLabel("그래프 * = 가스 기록 누락 · 상단 조회 기간 전체를 표시합니다. SELECT MONTH는 카드 화면에만 적용됩니다.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#657582; font-size:11px;")
+        layout.addWidget(note)
+        self.tabs.addTab(page, "기간별 사용량 추이")
+
+    def refresh_monthly(self, *_):
+        month = self.selected_month.date().toString("yyyy-MM")
+        equipment = self.equipment_filter.currentData()
+        configured = [s.strip() for text in (self.n2_edit.text(), self.o2_edit.text())
+                      for s in text.split(",") if s.strip()]
+        columns = list(dict.fromkeys(configured))
+        tubes = [f"TUBE{i:02d}" for i in range(1, 7)]
+        records = pd.DataFrame()
+        channels = pd.DataFrame()
+        if self.result is not None:
+            records = self.result.tubes
+            channels = self.result.channels
+            if equipment is not None:
+                records = records[records["Equipment"] == equipment]
+                channels = channels[channels["Equipment"] == equipment]
+            tubes = sorted(set(tubes) | set(records["Tube"]))
+            records = records[records["Month"] == month]
+            channels = channels[channels["Month"] == month]
+        signature = (tuple(tubes), tuple(columns))
+        if self._card_signature != signature:
+            while self.cards_layout.count():
+                item = self.cards_layout.takeAt(0)
+                if item.widget() is not None:
+                    item.widget().deleteLater()
+            self.tube_cards = {}
+            for index, tube in enumerate(tubes):
+                card = TubeUsageCard(tube, columns)
+                self.cards_layout.addWidget(card, index // 2, index % 2)
+                self.tube_cards[tube] = card
+            self._card_signature = signature
+        for tube, card in self.tube_cards.items():
+            values, totals, state = {}, {}, "기록 없음"
+            if not records.empty:
+                selected = records[records["Tube"] == tube]
+                for gas in ("N2", "O2"):
+                    totals[gas] = selected[f"{gas} (ft³)"].sum(min_count=1)
+                if any(pd.notna(v) for v in totals.values()):
+                    state = "부분 집계" if (selected["Status"] != "기록 구간 집계").any() else "기록 구간 집계"
+            if not channels.empty:
+                values = channels[channels["Tube"] == tube].groupby("Channel")["Volume (ft³)"].sum(min_count=1).to_dict()
+            card.set_usage(values, totals, state)
+        for gas, label in self.monthly_totals.items():
+            total = records[f"{gas} (ft³)"].sum(min_count=1) if not records.empty else float("nan")
+            label.setText(volume_text(total))
+        self.month_caption.setText(f"{month}  |  {equipment or '전체 설비 합산'}  |  선택 월의 기록된 사용량 · N2 / O2")
 
     def restore_defaults(self):
         self.n2_edit.setText(", ".join(DEFAULT_N2))
@@ -215,6 +334,8 @@ class GasUsageDialog(QDialog):
         for axis in self.chart.axes():
             self.chart.removeAxis(axis)
             axis.deleteLater()
+        self.tabs.setTabText(4, "검토 내역")
+        self.refresh_monthly()
 
     def start_calculation(self):
         if self.worker is not None:
@@ -234,6 +355,7 @@ class GasUsageDialog(QDialog):
         self.invalidate()
         self.controls.setEnabled(False)
         self.cancel_button.setEnabled(True)
+        self.progress_widget.show()
         self.progress.setRange(0, 0)
         self.status.setText("공정 로그를 찾고 있습니다…")
         for key, value in (("n2", self.n2_edit.text()), ("o2", self.o2_edit.text()),
@@ -265,6 +387,7 @@ class GasUsageDialog(QDialog):
         self.cancel_button.setEnabled(False)
         self.progress.setRange(0, 100)
         self.progress.setValue(100 if self.result is not None else 0)
+        self.progress_widget.hide()
         if self._close_when_finished:
             super().reject()
 
@@ -280,14 +403,26 @@ class GasUsageDialog(QDialog):
             combo.addItem(title, None)
             for value in sorted(result.tubes[column].unique()):
                 combo.addItem(value, value)
+            if column == "Equipment" and combo.count() > 1:
+                combo.setCurrentIndex(1)
             combo.blockSignals(False)
+        months = result.settings.set_index("Setting").loc["Months", "Value"].split(" ~ ")
+        self.selected_month.blockSignals(True)
+        self.selected_month.setMinimumDate(QDate.fromString(months[0] + "-01", "yyyy-MM-dd"))
+        last = QDate.fromString(months[1] + "-01", "yyyy-MM-dd")
+        self.selected_month.setMaximumDate(QDate(last.year(), last.month(), last.daysInMonth()))
+        valid = result.tubes[result.tubes["Equipment"] == self.equipment_filter.currentData()]
+        valid = valid.dropna(subset=VOLUME_COLUMNS[:2], how="all")
+        if not valid.empty and self.selected_month.date().toString("yyyy-MM") not in set(valid["Month"]):
+            self.selected_month.setDate(QDate.fromString(valid["Month"].max() + "-01", "yyyy-MM-dd"))
+        self.selected_month.blockSignals(False)
         self.export_button.setEnabled(True)
         has_volume = result.tubes[VOLUME_COLUMNS[:2]].notna().any().any()
         prefix = "집계 완료" if has_volume else "선택 기간에 집계 가능한 기록이 없습니다"
         self.status.setText(f"{prefix} · 읽은 파일 {len(result.files):,}개 · 검토 항목 {len(result.issues):,}개. "
                             "검토 내역의 제외 구간과 누락 파일을 확인하세요.")
         self.fill_table(self.issues_table, result.issues)
-        self.tabs.setTabText(2, f"검토 내역 ({len(result.issues):,})")
+        self.tabs.setTabText(4, f"검토 내역 ({len(result.issues):,})")
         self.refresh_views()
 
     @staticmethod
@@ -307,6 +442,7 @@ class GasUsageDialog(QDialog):
     def refresh_views(self, *_):
         if self.result is None:
             return
+        self.refresh_monthly()
         equipment, tubes = self.result.equipment, self.result.tubes
         eq, tube = self.equipment_filter.currentData(), self.tube_filter.currentData()
         if eq is not None:

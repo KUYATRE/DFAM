@@ -165,11 +165,29 @@ class GasUsageTests(unittest.TestCase):
         path = self.root / "result.xlsx"
         export_gas_usage(result, path)
         with pd.ExcelFile(path) as book:
-            self.assertEqual(len(book.sheet_names), 5)
+            self.assertEqual(len(book.sheet_names), 6)
             frame = pd.read_excel(book, sheet_name="Tube monthly")
             self.assertAlmostEqual(frame.iloc[0]["N2 (ft³)"], 1)
             self.assertTrue(pd.isna(frame.iloc[1]["N2 (ft³)"]))
             self.assertIn("Formula", pd.read_excel(book, sheet_name="Settings")["Setting"].tolist())
+            channels = pd.read_excel(book, sheet_name="Channel monthly")
+            self.assertAlmostEqual(channels.query("Gas == 'N2'")["Volume (ft³)"].sum(), 1)
+
+    def test_channel_values_share_overlap_and_month_clipping_with_totals(self):
+        self.write(log(["2026-01-31 23:59:30", "2026-02-01 00:00:30"],
+                       n2=[0, 2 * CM3_PER_FT3]), name="TUBE01_a.csv")
+        later = log(["2026-02-01 00:00:00", "2026-02-01 00:01:00"])
+        for column in DEFAULT_N2:
+            later[column] = 0
+        later[DEFAULT_N2[0]] = CM3_PER_FT3
+        self.write(later, name="TUBE01_b.csv")
+        result = self.result()
+        jan = result.channels.query("Month == '2026-01' and Gas == 'N2'")
+        feb = result.channels.query("Month == '2026-02' and Gas == 'N2'")
+        self.assertTrue(np.allclose(jan["Volume (ft³)"], 0.0625))
+        self.assertAlmostEqual(feb.set_index("Channel").loc[DEFAULT_N2[0], "Volume (ft³)"], 0.6875)
+        self.assertAlmostEqual(feb["Volume (ft³)"].sum(), result.tubes.iloc[1]["N2 (ft³)"])
+        self.assertAlmostEqual(feb["Volume (ft³)"].sum(), 1.25)
 
 
 class GasUsageUiTests(unittest.TestCase):
@@ -259,6 +277,38 @@ class GasUsageUiTests(unittest.TestCase):
             panel.close()
             panel.deleteLater()
             QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    def test_selected_month_cards_do_not_narrow_the_period_trend(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for month, multiplier in (("01", 1), ("02", 4)):
+                for tube in (1, 2):
+                    times = [f"2026-{month}-01 00:00:00", f"2026-{month}-01 00:01:00"]
+                    log(times, n2=CM3_PER_FT3 * multiplier * tube, tube=tube).to_csv(
+                        root / f"TUBE0{tube}_{month}.csv", index=False)
+            result = calculate_monthly_usage(root, GasUsageConfig("2026-01", "2026-02"))
+            settings = QSettings(str(root / "ui.ini"), QSettings.IniFormat)
+            dialog = GasUsageDialog(root, settings=settings)
+            try:
+                dialog.show_result(result)
+                dialog.selected_month.setDate(QDate(2026, 2, 1))
+                self.assertIn("12.000000", dialog.monthly_totals["N2"].text())
+                self.assertIn("1.000000", dialog.tube_cards["TUBE01"].values[DEFAULT_N2[0]].text())
+                dialog.selected_month.setDate(QDate(2026, 1, 1))
+                self.assertIn("3.000000", dialog.monthly_totals["N2"].text())
+                self.assertIn("0.250000", dialog.tube_cards["TUBE01"].values[DEFAULT_N2[0]].text())
+                dialog.tube_filter.setCurrentIndex(1)
+                self.assertIn("5.0000", dialog.summary.text())
+                self.assertIn("3.000000", dialog.monthly_totals["N2"].text())
+                bars = dialog.chart.series()[0].barSets()[0]
+                self.assertEqual([bars.at(0), bars.at(1)], [1, 4])
+                dialog.n2_edit.setText("replacement")
+                self.assertIn("—", dialog.monthly_totals["N2"].text())
+                self.assertIn("—", dialog.tube_cards["TUBE01"].values["replacement"].text())
+            finally:
+                dialog.close()
+                dialog.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 if __name__ == "__main__":
