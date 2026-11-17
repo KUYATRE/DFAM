@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import sqlite3
 
 import numpy as np
 import pandas as pd
@@ -101,6 +102,80 @@ def parse_times(raw):
     if not pd.api.types.is_datetime64_dtype(result.dtype):
         raise ValueError("시간은 설비의 현지 날짜/시각이어야 합니다 (시간대 혼합 불가).")
     return result
+
+
+def read_time_bounds(path, time_column, cancelled=lambda: False):
+    """Inspect only timestamps; a filename alone cannot exclude a crossing run."""
+    for encoding in ("utf-8-sig", "cp949", "euc-kr"):
+        try:
+            first = last = None
+            with pd.read_csv(path, encoding=encoding, chunksize=100_000,
+                             usecols=lambda c: normalize_column(c) == time_column) as reader:
+                for chunk in reader:
+                    if cancelled():
+                        raise CalculationCancelled()
+                    if len(chunk.columns) != 1:
+                        return None
+                    times = parse_times(chunk.iloc[:, 0]).dropna()
+                    if not times.empty:
+                        lo, hi = int(times.min().value), int(times.max().value)
+                        first = lo if first is None else min(first, lo)
+                        last = hi if last is None else max(last, hi)
+            return None if first is None else (first, last)
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
+class LogPeriodIndex:
+    """Optional local cache of actual CSV time bounds, never of gas totals."""
+    def __init__(self, cache_path=None):
+        self.connection = None
+        if cache_path is not None:
+            try:
+                Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+                self.connection = sqlite3.connect(str(cache_path), timeout=1)
+                self.connection.execute("""CREATE TABLE IF NOT EXISTS periods_v1 (
+                    path TEXT, time_column TEXT, size INTEGER, mtime_ns INTEGER,
+                    ctime_ns INTEGER, first_ns INTEGER, last_ns INTEGER,
+                    PRIMARY KEY(path, time_column))""")
+            except (OSError, sqlite3.Error):
+                self.close()
+
+    def close(self):
+        if self.connection is not None:
+            try:
+                self.connection.commit()
+            except sqlite3.Error:
+                pass
+            self.connection.close()
+            self.connection = None
+
+    def bounds(self, path, time_column, cancelled):
+        stat = path.stat()
+        fingerprint = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        key = (str(path.resolve()), time_column)
+        if self.connection is not None:
+            try:
+                row = self.connection.execute(
+                    "SELECT size, mtime_ns, ctime_ns, first_ns, last_ns FROM periods_v1 WHERE path=? AND time_column=?",
+                    key).fetchone()
+                if row is not None and row[:3] == fingerprint:
+                    return row[3:]
+            except sqlite3.Error:
+                self.close()
+        bounds = read_time_bounds(path, time_column, cancelled)
+        after = path.stat()
+        if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != fingerprint:
+            # A live log changed during inspection: include it and do not cache it.
+            return None
+        if bounds is not None and self.connection is not None:
+            try:
+                self.connection.execute("INSERT OR REPLACE INTO periods_v1 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                        (*key, *fingerprint, *bounds))
+            except sqlite3.Error:
+                self.close()
+        return bounds
 
 
 def flow_intervals(df, path, tube, config, issues):
@@ -225,7 +300,7 @@ def summarize_usage(integrated, identities, config):
 
 
 def calculate_monthly_usage(root, config, progress=lambda done, total, name: None,
-                            cancelled=lambda: False):
+                            cancelled=lambda: False, *, period_cache=None):
     config.validate()
     root = Path(root)
     if not root.is_dir():
@@ -238,10 +313,31 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
             paths.append(path)
     paths.sort()
     issues, frames, records, identities = [], [], [], set()
-    for i, path in enumerate(paths):
+    candidates = []
+    period_start = pd.Period(config.start_month, "M").start_time.value
+    period_end = (pd.Period(config.end_month, "M") + 1).start_time.value
+    index = LogPeriodIndex(period_cache)
+    try:
+        for i, path in enumerate(paths):
+            if cancelled():
+                raise CalculationCancelled()
+            progress(i, len(paths), "기록 기간 확인 (최초/변경 파일의 시간 컬럼만 확인)")
+            try:
+                bounds = index.bounds(path, config.time_column, cancelled)
+            except (ValueError, OSError, pd.errors.ParserError):
+                bounds = None  # Let the regular reader report unusable files.
+            if bounds is not None and (bounds[1] < period_start or bounds[0] >= period_end):
+                tube = tube_from_path(path)
+                if tube is not None:
+                    identities.add(tube)
+                continue
+            candidates.append(path)
+    finally:
+        index.close()
+    for i, path in enumerate(candidates):
         if cancelled():
             raise CalculationCancelled()
-        progress(i, len(paths), path.name)
+        progress(i, len(candidates), f"유량 집계 · {path.name}")
         tube = tube_from_path(path)
         if tube is None:
             issues.append([str(path), "Tube를 파일명/폴더에서 식별할 수 없어 제외", 1])
@@ -254,7 +350,7 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
             identities.add(tube)
         except (ValueError, OSError, pd.errors.ParserError) as exc:
             issues.append([str(path), f"파일 제외: {exc}", 1])
-    progress(len(paths), len(paths), "월별 합계 계산 중")
+    progress(len(candidates), len(candidates), "월별 합계 계산 중")
     if cancelled():
         raise CalculationCancelled()
     columns = ["Month", "Tube", "Gas", "Volume", "Hours"]
@@ -263,6 +359,9 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
     tubes, monthly = summarize_usage(integrated, identities, config)
     settings = pd.DataFrame([
         ["Root", str(root.resolve())], ["Months", f"{config.start_month} ~ {config.end_month}"],
+        ["File selection", "Actual timestamp bounds intersect query; filenames do not determine the period"],
+        ["Scanned files", len(paths)], ["Candidate files", len(candidates)],
+        ["Skipped outside period", len(paths) - len(candidates)],
         ["Time", config.time_column], ["N2 sccm columns", ", ".join(config.n2_columns)],
         ["O2 sccm columns", ", ".join(config.o2_columns)],
         ["Maximum gap (s)", "Unlimited" if config.max_gap_seconds is None else config.max_gap_seconds],

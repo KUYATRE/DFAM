@@ -206,6 +206,72 @@ class GasUsageTests(unittest.TestCase):
             channels = pd.read_excel(book, sheet_name="Channel monthly")
             self.assertAlmostEqual(channels.query("Gas == 'N2'")["Volume (ft³)"].sum(), 1)
 
+    def test_october_reads_flow_only_for_october_and_labels_the_scan_separately(self):
+        for month in (8, 9, 10):
+            self.write(log([f"2026-{month:02d}-01 00:00:00", f"2026-{month:02d}-01 00:01:00"]),
+                       name=f"TUBE01_run_2026{month:02d}01.csv")
+        from gas_usage import read_flow_csv
+        events = []
+        with patch("gas_usage.read_flow_csv", wraps=read_flow_csv) as reader:
+            result = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-10"),
+                                             progress=lambda *args: events.append(args))
+        self.assertEqual([c.args[0].name for c in reader.call_args_list], ["TUBE01_run_20261001.csv"])
+        self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 1)
+        self.assertEqual(result.tubes["Month"].tolist(), ["2026-10"])
+        settings = result.settings.set_index("Setting")["Value"]
+        self.assertEqual(settings["Skipped outside period"], 2)
+        self.assertEqual(len(result.files), 1)
+        self.assertTrue(any("기록 기간 확인" in e[2] for e in events))
+        self.assertEqual([e[2] for e in events if "유량 집계" in e[2]], ["유량 집계 · TUBE01_run_20261001.csv"])
+
+    def test_file_selection_uses_contents_and_keeps_cross_month_intervals(self):
+        # Both the file name and the final row alone would exclude this file incorrectly.
+        self.write(log(["2026-09-30 23:59:00", "2026-10-01 00:01:00", "2026-09-30 23:59:00"]),
+                   name="TUBE01_recipe_20260801.csv")
+        result = self.result(GasUsageConfig("2026-10", "2026-10"))
+        self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 1)
+        self.assertTrue(result.issues["Issue"].str.contains("역행").any())
+        self.assertEqual(len(result.files), 1)
+
+    def test_period_index_reuses_unchanged_files_and_rechecks_modified_files(self):
+        from gas_usage import read_time_bounds
+        cache = self.root / "periods.sqlite3"
+        path = self.write(log(["2026-08-01 00:00:00", "2026-08-01 00:01:00"]))
+        config = GasUsageConfig("2026-10", "2026-10")
+        first = calculate_monthly_usage(self.root, config, period_cache=cache)
+        self.assertTrue(first.files.empty)
+        with patch("gas_usage.read_time_bounds", wraps=read_time_bounds) as probe:
+            calculate_monthly_usage(self.root, config, period_cache=cache)
+            probe.assert_not_called()
+            previous = path.stat().st_mtime_ns
+            self.write(log(["2026-10-01 00:00:00", "2026-10-01 00:01:00"]))
+            os.utime(path, ns=(previous + 1_000_000, previous + 1_000_000))
+            updated = calculate_monthly_usage(self.root, config, period_cache=cache)
+            probe.assert_called_once()
+        self.assertAlmostEqual(updated.tubes.iloc[0]["N2 (ft³)"], 1)
+
+    def test_period_index_is_separate_for_time_columns_and_cache_failure_is_safe(self):
+        frame = log(["2026-08-01 00:00:00", "2026-08-01 00:01:00"])
+        frame["Alternate"] = ["2026-10-01 00:00:00", "2026-10-01 00:01:00"]
+        self.write(frame)
+        cache = self.root / "periods.sqlite3"
+        original = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-10"), period_cache=cache)
+        alternate = GasUsageConfig("2026-10", "2026-10", time_column="Alternate")
+        selected = calculate_monthly_usage(self.root, alternate, period_cache=cache)
+        self.assertTrue(original.files.empty)
+        self.assertAlmostEqual(selected.tubes.iloc[0]["N2 (ft³)"], 1)
+        broken = self.root / "broken.sqlite3"
+        broken.write_bytes(b"invalid database")
+        recovered = calculate_monthly_usage(self.root, alternate, period_cache=broken)
+        pd.testing.assert_frame_equal(recovered.tubes, selected.tubes)
+
+    def test_unreadable_time_metadata_keeps_file_for_diagnostics(self):
+        frame = log(["bad", "bad"])
+        self.write(frame)
+        result = self.result()
+        self.assertFalse(result.files.empty)
+        self.assertTrue(result.issues["Issue"].str.contains("잘못되거나 누락된 시각").any())
+
     def test_month_export_slices_range_without_mutating_original(self):
         self.write(log(["2026-01-31 23:59:30", "2026-02-01 00:00:30"]))
         result = self.result()
@@ -239,7 +305,7 @@ class GasUsageUiTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def test_close_waits_for_cancellation_before_destroying_worker(self):
-        def slow_scan(root, config, progress, cancelled):
+        def slow_scan(root, config, progress, cancelled, **kwargs):
             while not cancelled():
                 time.sleep(0.001)
             raise CalculationCancelled()

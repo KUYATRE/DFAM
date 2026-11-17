@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pandas as pd
-from PySide6.QtCore import QDate, QMargins, QSettings, QThread, Qt, Signal
+from PySide6.QtCore import QDate, QMargins, QSettings, QStandardPaths, QThread, Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtCharts import QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView, QValueAxis
 from PySide6.QtWidgets import (
@@ -36,8 +36,11 @@ class GasUsageWorker(QThread):
 
     def run(self):
         try:
-            result = calculate_monthly_usage(self.root, self.config, self.progress.emit,
-                                             self.isInterruptionRequested)
+            cache = (Path(QStandardPaths.writableLocation(QStandardPaths.GenericCacheLocation))
+                     / "DFAM" / "GasUsage" / "file_periods.sqlite3")
+            result = calculate_monthly_usage(
+                self.root, self.config, self.progress.emit,
+                self.isInterruptionRequested, period_cache=cache)
             if self.isInterruptionRequested():
                 raise CalculationCancelled()
             self.succeeded.emit(result)
@@ -50,7 +53,7 @@ class GasUsageWorker(QThread):
 class GasUsageDialog(QDialog):
     def __init__(self, proc_log_dir, parent=None, settings=None):
         super().__init__(parent)
-        self.setWindowTitle("MONTHLY GAS FLOW · v3.03")
+        self.setWindowTitle("MONTHLY GAS FLOW · v3.04")
         self.resize(1180, 1000)
         self.settings = settings if settings is not None else QSettings("DFAM", "GasUsage")
         self.result = None
@@ -430,7 +433,9 @@ class GasUsageDialog(QDialog):
         self.cancel_button.setEnabled(True)
         self.progress_widget.show()
         self.progress.setRange(0, 0)
-        self.status.setText("공정 로그를 찾고 있습니다…")
+        self._active_period = (config.start_month if config.start_month == config.end_month
+                               else f"{config.start_month} ~ {config.end_month}")
+        self.status.setText(f"{self._active_period} · 대상 로그의 기록 기간을 확인합니다…")
         for key, value in (("n2", self.n2_edit.text()), ("o2", self.o2_edit.text()),
                            ("time", self.time_edit.text()), ("gap_limit_seconds", self.gap.value())):
             self.settings.setValue(key, value)
@@ -445,7 +450,7 @@ class GasUsageDialog(QDialog):
     def update_progress(self, done, total, name):
         self.progress.setRange(0, max(total, 1))
         self.progress.setValue(done)
-        self.status.setText(f"{done:,} / {total:,} 파일 · {name}")
+        self.status.setText(f"{self._active_period} · {name} · {done:,} / {total:,} 파일")
 
     def cancel_calculation(self):
         if self.worker is not None:
@@ -486,7 +491,11 @@ class GasUsageDialog(QDialog):
             self.month_result = result
         has_volume = result.tubes[VOLUME_COLUMNS[:2]].notna().any().any()
         prefix = "집계 완료" if has_volume else "선택 기간에 집계 가능한 기록이 없습니다"
-        self.status.setText(f"{prefix} · 읽은 파일 {len(result.files):,}개 · 검토 항목 {len(result.issues):,}개. "
+        values = result.settings.set_index("Setting")["Value"]
+        skipped = int(values.get("Skipped outside period", 0))
+        period = values["Months"].split(" ~ ")
+        label = period[0] if period[0] == period[1] else " ~ ".join(period)
+        self.status.setText(f"{label} · {prefix} · 집계 대상 파일 {len(result.files):,}개 · 기간 외 제외 {skipped:,}개 · 검토 {len(result.issues):,}개. "
                             "검토 내역의 제외 구간과 누락 파일을 확인하세요.")
         self.refresh_monthly()
         self.refresh_views()
