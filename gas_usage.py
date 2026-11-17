@@ -16,7 +16,7 @@ DEFAULT_O2 = ("High O2(PV)", "Low O2(PV)")
 VOLUME_COLUMNS = ["N2 (ft³)", "O2 (ft³)", "N2+O2 (ft³)"]
 HOUR_COLUMNS = ["N2 recorded (h)", "O2 recorded (h)"]
 ISSUE_COLUMNS = ["File", "Issue", "Count"]
-CHANNEL_COLUMNS = ["Month", "Equipment", "Tube", "Gas", "Channel", "Volume (ft³)", "Recorded (h)"]
+CHANNEL_COLUMNS = ["Month", "Tube", "Gas", "Channel", "Volume (ft³)", "Recorded (h)"]
 
 
 class CalculationCancelled(Exception):
@@ -52,7 +52,7 @@ class GasUsageConfig:
 @dataclass
 class GasUsageResult:
     tubes: pd.DataFrame
-    equipment: pd.DataFrame
+    monthly: pd.DataFrame
     issues: pd.DataFrame
     files: pd.DataFrame
     settings: pd.DataFrame
@@ -74,7 +74,7 @@ def tube_from_path(path):
 
 
 def read_flow_csv(path, config):
-    wanted = {config.time_column, *config.n2_columns, *config.o2_columns, "EQP ID", "Tube ID", "TubeID"}
+    wanted = {config.time_column, *config.n2_columns, *config.o2_columns, "Tube ID", "TubeID"}
     last_error = None
     for encoding in ("utf-8-sig", "cp949", "euc-kr"):
         try:
@@ -103,10 +103,6 @@ def parse_times(raw):
     return result
 
 
-def _label(value):
-    return re.sub(r"^([0-9]+)\.0+$", r"\1", str(value).strip())
-
-
 def flow_intervals(df, path, tube, config, issues):
     """Keep each original adjacent pair; never bridge invalid rows or files."""
     file = str(path)
@@ -117,12 +113,6 @@ def flow_intervals(df, path, tube, config, issues):
 
     if config.time_column not in df or len(df) < 2:
         raise ValueError("시간 컬럼이 없거나 기록이 2행 미만입니다.")
-    equipment = "Equipment"
-    if "EQP ID" in df:
-        ids = df["EQP ID"].dropna().map(_label).unique()
-        if len(ids) != 1 or not ids[0]:
-            raise ValueError("EQP ID가 없거나 한 파일에 여러 설비가 있습니다.")
-        equipment = f"EQP {ids[0]}"
     for column in ("Tube ID", "TubeID"):
         if column in df:
             ids = pd.to_numeric(df[column], errors="coerce").dropna().unique()
@@ -156,7 +146,7 @@ def flow_intervals(df, path, tube, config, issues):
         issue(f"{gas} 음수/결측/비수치 유량 (인접 구간 제외)", (~good).sum())
         mask = valid & good[:-1] & good[1:]
         if mask.any():
-            intervals = pd.DataFrame({"Equipment": equipment, "Tube": tube, "Gas": gas,
+            intervals = pd.DataFrame({"Tube": tube, "Gas": gas,
                 "start": ns[:-1][mask], "end": ns[1:][mask],
                 "q0": rates[:-1][mask], "q1": rates[1:][mask], "File": file})
             for index, column in enumerate(columns):
@@ -164,7 +154,7 @@ def flow_intervals(df, path, tube, config, issues):
                 intervals[f"channel1:{column}"] = values[1:, index][mask]
             frames.append(intervals)
     first, last = times.min(), times.max()
-    record = [file, equipment, tube, len(df), str(first), str(last)]
+    record = [file, tube, len(df), str(first), str(last)]
     return frames, record
 
 
@@ -172,7 +162,7 @@ def integrate_intervals(intervals, config, issues, cancelled=lambda: False):
     """Trapezoids, clipped at query/month boundaries and prior covered intervals."""
     rows, channel_rows = [], []
     months = pd.period_range(config.start_month, config.end_month, freq="M")
-    for (equipment, tube, gas), group in intervals.groupby(["Equipment", "Tube", "Gas"], sort=True):
+    for (tube, gas), group in intervals.groupby(["Tube", "Gas"], sort=True):
         if cancelled():
             raise CalculationCancelled()
         group = group.sort_values(["start", "File", "end"], kind="stable")
@@ -195,7 +185,7 @@ def integrate_intervals(intervals, config, issues, cancelled=lambda: False):
             right = q0[keep] + (q1[keep] - q0[keep]) * ((hi[keep] - start[keep]) / duration)
             seconds = (hi[keep] - lo[keep]) / 1e9
             volume = np.sum((left + right) * 0.5 * seconds / 60.0) / CM3_PER_FT3
-            rows.append([str(month), equipment, tube, gas, float(volume), float(seconds.sum() / 3600)])
+            rows.append([str(month), tube, gas, float(volume), float(seconds.sum() / 3600)])
             # Use exactly the same valid and deduplicated intervals as the gas total.
             # Independent channel deduplication could otherwise make the cards disagree.
             for channel in config.n2_columns if gas == "N2" else config.o2_columns:
@@ -204,34 +194,34 @@ def integrate_intervals(intervals, config, issues, cancelled=lambda: False):
                 left_channel = c0 + (c1 - c0) * ((lo[keep] - start[keep]) / duration)
                 right_channel = c0 + (c1 - c0) * ((hi[keep] - start[keep]) / duration)
                 channel_volume = np.sum((left_channel + right_channel) * 0.5 * seconds / 60) / CM3_PER_FT3
-                channel_rows.append([str(month), equipment, tube, gas, channel,
+                channel_rows.append([str(month), tube, gas, channel,
                                      float(channel_volume), float(seconds.sum() / 3600)])
-    return (pd.DataFrame(rows, columns=["Month", "Equipment", "Tube", "Gas", "Volume", "Hours"]),
+    return (pd.DataFrame(rows, columns=["Month", "Tube", "Gas", "Volume", "Hours"]),
             pd.DataFrame(channel_rows, columns=CHANNEL_COLUMNS))
 
 
 def summarize_usage(integrated, identities, config):
     months = [str(m) for m in pd.period_range(config.start_month, config.end_month, freq="M")]
     index = pd.MultiIndex.from_tuples(
-        [(month, eq, tube) for month in months for eq, tube in sorted(identities)],
-        names=["Month", "Equipment", "Tube"])
+        [(month, tube) for month in months for tube in sorted(identities)],
+        names=["Month", "Tube"])
     tubes = pd.DataFrame(index=index)
     for gas in ("N2", "O2"):
-        subset = integrated[integrated["Gas"] == gas].set_index(["Month", "Equipment", "Tube"])
+        subset = integrated[integrated["Gas"] == gas].set_index(["Month", "Tube"])
         tubes[f"{gas} (ft³)"] = subset["Volume"]
         tubes[f"{gas} recorded (h)"] = subset["Hours"]
     tubes["N2+O2 (ft³)"] = tubes["N2 (ft³)"] + tubes["O2 (ft³)"]
     tubes["Status"] = np.where(tubes[VOLUME_COLUMNS[:2]].isna().all(axis=1), "기록 없음",
                               np.where(tubes[VOLUME_COLUMNS[:2]].isna().any(axis=1), "부분 집계", "기록 구간 집계"))
     tubes = tubes.reset_index()
-    equipment = tubes.groupby(["Month", "Equipment"], as_index=False)[VOLUME_COLUMNS[:2] + HOUR_COLUMNS].sum(min_count=1)
-    equipment["N2+O2 (ft³)"] = equipment["N2 (ft³)"] + equipment["O2 (ft³)"]
-    statuses = tubes.groupby(["Month", "Equipment"])["Status"].agg(
+    monthly = tubes.groupby(["Month"], as_index=False)[VOLUME_COLUMNS[:2] + HOUR_COLUMNS].sum(min_count=1)
+    monthly["N2+O2 (ft³)"] = monthly["N2 (ft³)"] + monthly["O2 (ft³)"]
+    statuses = tubes.groupby("Month")["Status"].agg(
         lambda values: "기록 없음" if (values == "기록 없음").all() else
         ("부분 집계" if (values != "기록 구간 집계").any() else "기록 구간 집계"))
-    equipment["Status"] = [statuses.loc[m, e] for m, e in zip(equipment["Month"], equipment["Equipment"])]
-    return (tubes[["Month", "Equipment", "Tube", *VOLUME_COLUMNS, *HOUR_COLUMNS, "Status"]],
-            equipment[["Month", "Equipment", *VOLUME_COLUMNS, *HOUR_COLUMNS, "Status"]])
+    monthly["Status"] = [statuses.loc[m] for m in monthly["Month"]]
+    return (tubes[["Month", "Tube", *VOLUME_COLUMNS, *HOUR_COLUMNS, "Status"]],
+            monthly[["Month", *VOLUME_COLUMNS, *HOUR_COLUMNS, "Status"]])
 
 
 def calculate_monthly_usage(root, config, progress=lambda done, total, name: None,
@@ -261,16 +251,16 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
             pieces, record = flow_intervals(df, path, tube, config, issues)
             frames.extend(pieces)
             records.append(record)
-            identities.add((record[1], tube))
+            identities.add(tube)
         except (ValueError, OSError, pd.errors.ParserError) as exc:
             issues.append([str(path), f"파일 제외: {exc}", 1])
     progress(len(paths), len(paths), "월별 합계 계산 중")
     if cancelled():
         raise CalculationCancelled()
-    columns = ["Month", "Equipment", "Tube", "Gas", "Volume", "Hours"]
+    columns = ["Month", "Tube", "Gas", "Volume", "Hours"]
     integrated, channels = (integrate_intervals(pd.concat(frames, ignore_index=True), config, issues, cancelled)
                             if frames else (pd.DataFrame(columns=columns), pd.DataFrame(columns=CHANNEL_COLUMNS)))
-    tubes, equipment = summarize_usage(integrated, identities, config)
+    tubes, monthly = summarize_usage(integrated, identities, config)
     settings = pd.DataFrame([
         ["Root", str(root.resolve())], ["Months", f"{config.start_month} ~ {config.end_month}"],
         ["Time", config.time_column], ["N2 sccm columns", ", ".join(config.n2_columns)],
@@ -279,18 +269,31 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
         ["Formula", "sum((q0+q1)/2 * seconds/60) / 28316.846592"],
         ["Volume basis", "ft³ at the same standard conditions as the source sccm; no T/P correction"],
         ["Scope", "Recorded process intervals only; excludes unlogged idle/purge usage and final-sample extrapolation"],
-        ["Overlap", "Count once per equipment/tube/gas; earliest start then file path wins; uncovered tails retained"],
-        ["Missing", "Blank is unavailable, not zero. Equipment totals sum available Tube values."],
-        ["Recorded hours", "Equipment hours are summed Tube-hours, not elapsed calendar hours"],
+        ["Overlap", "Count once per Tube/gas in this single-machine log folder; earliest start then file path wins; uncovered tails retained"],
+        ["Missing", "Blank is unavailable, not zero. Monthly totals sum available Tube values."],
+        ["Recorded hours", "Monthly hours are summed Tube-hours, not elapsed calendar hours"],
     ], columns=["Setting", "Value"])
-    return GasUsageResult(tubes, equipment, pd.DataFrame(issues, columns=ISSUE_COLUMNS),
-                          pd.DataFrame(records, columns=["File", "Equipment", "Tube", "Rows", "First", "Last"]),
+    return GasUsageResult(tubes, monthly, pd.DataFrame(issues, columns=ISSUE_COLUMNS),
+                          pd.DataFrame(records, columns=["File", "Tube", "Rows", "First", "Last"]),
                           settings, channels)
+
+
+def select_usage_month(result, month):
+    """Slice volumes for export; keep original file diagnostics and their scan scope."""
+    settings = result.settings.copy()
+    scope = settings.loc[settings["Setting"] == "Months", "Value"].iloc[0]
+    settings.loc[settings["Setting"] == "Months", "Value"] = f"{month} ~ {month}"
+    settings.loc[len(settings)] = ["Review scan scope", scope]
+    return GasUsageResult(
+        result.tubes[result.tubes["Month"] == month].copy(),
+        result.monthly[result.monthly["Month"] == month].copy(),
+        result.issues.copy(), result.files.copy(), settings,
+        result.channels[result.channels["Month"] == month].copy())
 
 
 def export_gas_usage(result, path):
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        for name, frame in (("Equipment monthly", result.equipment), ("Tube monthly", result.tubes),
+        for name, frame in (("Monthly totals", result.monthly), ("Tube monthly", result.tubes),
                             ("Channel monthly", result.channels),
                             ("Review", result.issues), ("Files", result.files), ("Settings", result.settings)):
             frame.to_excel(writer, sheet_name=name, index=False)

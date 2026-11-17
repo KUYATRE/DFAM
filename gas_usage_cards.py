@@ -2,6 +2,7 @@
 
 import re
 import pandas as pd
+from ui_theme import apply_shadow
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout
 
@@ -15,11 +16,12 @@ class TubeUsageCard(QFrame):
         super().__init__(parent)
         self.setObjectName("tubeUsageCard")
         self.setStyleSheet("""
-            QFrame#tubeUsageCard {background:white; border:1px solid #aebbc6; border-radius:2px;}
+            QFrame#tubeUsageCard {background:white; border:1px solid #d9dee7; border-radius:18px;}
             QFrame#tubeUsageCard QLabel {background:transparent; border:0; padding:0; color:#172b3c;}
         """)
+        apply_shadow(self, blur=22, y_offset=4)
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 9, 14, 10)
+        root.setContentsMargins(18, 12, 18, 12)
         root.setSpacing(5)
         header = QHBoxLayout()
         title = QLabel(re.sub(r"^TUBE", "TUBE ", tube))
@@ -32,7 +34,7 @@ class TubeUsageCard(QFrame):
         root.addLayout(header)
         rows = QGridLayout()
         rows.setHorizontalSpacing(18)
-        rows.setVerticalSpacing(2)
+        rows.setVerticalSpacing(1)
         rows.setColumnStretch(0, 1)
         self.values = {}
         for index, name in enumerate(channels):
@@ -47,7 +49,7 @@ class TubeUsageCard(QFrame):
             rows.addWidget(value, index, 1)
             self.values[name] = value
         self.totals = {}
-        for index, (gas, color) in enumerate((("N2", "#163ea1"), ("O2", "#167035")), start=len(channels)):
+        for index, (gas, color) in enumerate((("N2", "#0f6cbd"), ("O2", "#11877d")), start=len(channels)):
             label, value = QLabel(f"{gas} TOTAL"), QLabel("— ft³")
             value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             for item in (label, value):
