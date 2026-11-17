@@ -31,7 +31,7 @@ class GasUsageTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.config = GasUsageConfig("2026-01", "2026-02")
+        self.config = GasUsageConfig("2026-01", "2026-02", filename_period=False)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -70,16 +70,16 @@ class GasUsageTests(unittest.TestCase):
         result = self.result()
         self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 0.25)
         self.assertAlmostEqual(result.tubes.iloc[1]["N2 (ft³)"], 0.75)
-        feb = self.result(GasUsageConfig("2026-02", "2026-02"))
+        feb = self.result(GasUsageConfig("2026-02", "2026-02", filename_period=False))
         self.assertAlmostEqual(feb.tubes.iloc[0]["N2 (ft³)"], 0.75)
 
     def test_leap_year_and_year_boundary(self):
         self.write(log(["2028-02-29 23:59:30", "2028-03-01 00:00:30"]))
-        result = self.result(GasUsageConfig("2028-02", "2028-03"))
+        result = self.result(GasUsageConfig("2028-02", "2028-03", filename_period=False))
         self.assertEqual(result.tubes["Month"].tolist(), ["2028-02", "2028-03"])
         self.assertTrue(np.allclose(result.tubes["N2 (ft³)"], [0.5, 0.5]))
         self.write(log(["2028-12-31 23:59:30", "2029-01-01 00:00:30"]), name="TUBE01_year.csv")
-        result = self.result(GasUsageConfig("2028-12", "2029-01"))
+        result = self.result(GasUsageConfig("2028-12", "2029-01", filename_period=False))
         self.assertTrue(np.allclose(result.tubes["N2 (ft³)"], [0.5, 0.5]))
 
     def test_equipment_ids_are_ignored_and_overlaps_deduplicated_per_tube(self):
@@ -127,7 +127,7 @@ class GasUsageTests(unittest.TestCase):
     def test_timestamp_gaps_bad_rows_and_files_are_not_bridged(self):
         self.write(log(["2026-01-01 00:00:00", "bad", "2026-01-01 00:01:00", "2026-01-01 00:03:00"]))
         self.write(log(["2026-01-01 00:04:00", "2026-01-01 00:05:00"]), name="TUBE01_second.csv")
-        limited = self.result(GasUsageConfig("2026-01", "2026-02", max_gap_seconds=60))
+        limited = self.result(GasUsageConfig("2026-01", "2026-02", max_gap_seconds=60, filename_period=False))
         self.assertAlmostEqual(limited.tubes.iloc[0]["N2 (ft³)"], 1)
         self.assertTrue(limited.issues["Issue"].str.contains("60초 초과").any())
 
@@ -184,9 +184,9 @@ class GasUsageTests(unittest.TestCase):
             calculate_monthly_usage(self.root, self.config, cancelled=lambda: True)
 
     def test_config_validation(self):
-        for config in [GasUsageConfig("2026-02", "2026-01"),
-                       GasUsageConfig("2026-01", "2026-02", max_gap_seconds=0),
-                       GasUsageConfig("2026-01", "2026-02", n2_columns=("x",), o2_columns=("x",))]:
+        for config in [GasUsageConfig("2026-02", "2026-01", filename_period=False),
+                       GasUsageConfig("2026-01", "2026-02", max_gap_seconds=0, filename_period=False),
+                       GasUsageConfig("2026-01", "2026-02", n2_columns=("x",), o2_columns=("x",), filename_period=False)]:
             with self.assertRaises(ValueError):
                 config.validate()
 
@@ -213,7 +213,7 @@ class GasUsageTests(unittest.TestCase):
         from gas_usage import read_flow_csv
         events = []
         with patch("gas_usage.read_flow_csv", wraps=read_flow_csv) as reader:
-            result = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-10"),
+            result = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-10", filename_period=False),
                                              progress=lambda *args: events.append(args))
         self.assertEqual([c.args[0].name for c in reader.call_args_list], ["TUBE01_run_20261001.csv"])
         self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 1)
@@ -228,7 +228,7 @@ class GasUsageTests(unittest.TestCase):
         # Both the file name and the final row alone would exclude this file incorrectly.
         self.write(log(["2026-09-30 23:59:00", "2026-10-01 00:01:00", "2026-09-30 23:59:00"]),
                    name="TUBE01_recipe_20260801.csv")
-        result = self.result(GasUsageConfig("2026-10", "2026-10"))
+        result = self.result(GasUsageConfig("2026-10", "2026-10", filename_period=False))
         self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 1)
         self.assertTrue(result.issues["Issue"].str.contains("역행").any())
         self.assertEqual(len(result.files), 1)
@@ -237,7 +237,7 @@ class GasUsageTests(unittest.TestCase):
         from gas_usage import read_time_bounds
         cache = self.root / "periods.sqlite3"
         path = self.write(log(["2026-08-01 00:00:00", "2026-08-01 00:01:00"]))
-        config = GasUsageConfig("2026-10", "2026-10")
+        config = GasUsageConfig("2026-10", "2026-10", filename_period=False)
         first = calculate_monthly_usage(self.root, config, period_cache=cache)
         self.assertTrue(first.files.empty)
         with patch("gas_usage.read_time_bounds", wraps=read_time_bounds) as probe:
@@ -255,8 +255,8 @@ class GasUsageTests(unittest.TestCase):
         frame["Alternate"] = ["2026-10-01 00:00:00", "2026-10-01 00:01:00"]
         self.write(frame)
         cache = self.root / "periods.sqlite3"
-        original = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-10"), period_cache=cache)
-        alternate = GasUsageConfig("2026-10", "2026-10", time_column="Alternate")
+        original = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-10", filename_period=False), period_cache=cache)
+        alternate = GasUsageConfig("2026-10", "2026-10", time_column="Alternate", filename_period=False)
         selected = calculate_monthly_usage(self.root, alternate, period_cache=cache)
         self.assertTrue(original.files.empty)
         self.assertAlmostEqual(selected.tubes.iloc[0]["N2 (ft³)"], 1)
@@ -418,7 +418,7 @@ class GasUsageTests(unittest.TestCase):
             changed = calculate_monthly_usage(self.root,self.config,period_cache=cache)
         self.assertEqual([c.args[0].name for c in reader.call_args_list],["TUBE01_a.csv"])
         self.assertAlmostEqual(changed.monthly.iloc[0]["N2 (ft³)"],3)
-        limited = calculate_monthly_usage(self.root,GasUsageConfig("2026-01","2026-02",max_gap_seconds=30),period_cache=cache)
+        limited = calculate_monthly_usage(self.root,GasUsageConfig("2026-01","2026-02",max_gap_seconds=30, filename_period=False),period_cache=cache)
         self.assertTrue(limited.tubes["N2 (ft³)"].isna().all())
 
     @unittest.skipUnless(os.name == "nt", "Windows resource scheduling")
@@ -447,6 +447,91 @@ class GasUsageTests(unittest.TestCase):
         thread.join(5)
         self.assertFalse(thread.is_alive())
         self.assertEqual(observations,[True,True])
+
+    def test_filename_month_filter_never_opens_other_months_or_probes_time_columns(self):
+        import gas_usage
+        selected = []
+        for hour in (0, 8, 16):
+            start = pd.Timestamp("2026-10-01") + pd.Timedelta(hours=hour)
+            selected.append(self.write(log([str(start), str(start+pd.Timedelta(hours=8))]),
+                                       name=f"TUBE01_261001_{hour}.csv"))
+        for name in ("TUBE01_260930_16.csv", "TUBE01_261101_0.csv", "TUBE01_260801_8.csv"):
+            (self.root/name).write_bytes(b"not a readable CSV")
+        events = []
+        with patch("gas_usage.read_time_bounds", side_effect=AssertionError("Unexpected timestamp probe")), \
+             patch("gas_usage.LogPeriodIndex", side_effect=AssertionError("Unexpected period index")), \
+             patch("gas_usage.DiskIntervalStore", side_effect=AssertionError("Unexpected disk sort")), \
+             patch("gas_usage.read_flow_csv", wraps=gas_usage.read_flow_csv) as reader:
+            result = calculate_monthly_usage(self.root,GasUsageConfig("2026-10","2026-10"),
+                                             progress=lambda *args: events.append(args))
+        self.assertEqual({c.args[0] for c in reader.call_args_list},set(selected))
+        self.assertEqual(reader.call_count,3)
+        self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"],1440)
+        self.assertEqual(result.settings.set_index("Setting").loc["Skipped outside period","Value"],3)
+        self.assertTrue(result.issues.empty)
+        self.assertTrue(any("파일명으로 대상 월 선별" in event[2] for event in events))
+
+    def test_proc_filename_validates_calendar_hours_and_padded_names(self):
+        from gas_usage import proc_log_period
+        for name in ("TUBE01_261109_0.csv","tube01_261109_00.CSV","TUBE01_261109_08.csv","TUBE01_261109_16.csv"):
+            tube,(start,end)=proc_log_period(Path(name))
+            self.assertEqual(tube,"TUBE01")
+            self.assertEqual(end-start,8*3600*10**9)
+        for name in ("TUBE01_261032_0.csv","TUBE01_260229_0.csv","TUBE01_261001_24.csv",
+                     "TUBE01_261001_2.csv","TUBE01_261001_x.csv","TUBE00_261001_0.csv"):
+            self.assertIsNone(proc_log_period(Path(name)))
+        self.assertIsNotNone(proc_log_period(Path("TUBE01_280229_16.csv")))
+
+    def test_filename_month_end_and_year_range_keep_actual_elapsed_seconds(self):
+        self.write(log(["2026-10-31 23:59:30","2026-11-01 00:00:00"]),name="TUBE01_261031_16.csv")
+        october=calculate_monthly_usage(self.root,GasUsageConfig("2026-10","2026-10"))
+        self.assertAlmostEqual(october.monthly.iloc[0]["N2 (ft³)"],.5)
+        for day in ("2026-12-31","2027-01-01"):
+            start=pd.Timestamp(day)+pd.Timedelta(hours=16)
+            self.write(log([str(start),str(start+pd.Timedelta(hours=8))]),name=f"TUBE01_{start:%y%m%d}_16.csv")
+        across_year=calculate_monthly_usage(self.root,GasUsageConfig("2026-12","2027-01"))
+        self.assertEqual(across_year.monthly["Month"].tolist(),["2026-12","2027-01"])
+        self.assertTrue(np.allclose(across_year.monthly["N2 (ft³)"],[480,480]))
+
+    def test_invalid_filename_is_reported_without_reading_and_legacy_mode_remains_available(self):
+        from gas_usage import read_flow_csv
+        self.write(log(["2026-10-01 00:00:00","2026-10-01 00:01:00"]),name="TUBE01_old_recipe.csv")
+        with patch("gas_usage.read_flow_csv",side_effect=AssertionError("Unknown names must not be opened")):
+            strict=calculate_monthly_usage(self.root,GasUsageConfig("2026-10","2026-10"))
+        self.assertTrue(strict.files.empty)
+        self.assertTrue(strict.issues["Issue"].str.contains("파일명 형식 제외").all())
+        legacy=calculate_monthly_usage(self.root,GasUsageConfig("2026-10","2026-10",filename_period=False))
+        self.assertAlmostEqual(legacy.monthly.iloc[0]["N2 (ft³)"],1)
+
+    def test_filename_window_mismatch_rolls_back_file_inside_overlap_group(self):
+        self.write(log(["2026-10-01 00:00:00","2026-10-01 00:01:00","2026-10-01 09:00:00"]),
+                   name="a/TUBE01_261001_0.csv")
+        self.write(log(["2026-10-01 00:00:00","2026-10-01 00:01:00"]),name="b/TUBE01_261001_0.csv")
+        with patch("gas_usage.CSV_CHUNK_ROWS",2):
+            result=calculate_monthly_usage(self.root,GasUsageConfig("2026-10","2026-10"))
+        self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"],1)
+        self.assertEqual(len(result.files),1)
+        self.assertTrue(result.issues["Issue"].str.contains("8시간 기록 범위").any())
+
+    def test_other_month_changes_keep_selected_month_cache_and_new_selected_file_is_read_once(self):
+        from gas_usage import read_flow_csv
+        self.write(log(["2026-10-01 00:00:00","2026-10-01 00:01:00"]),name="TUBE01_261001_0.csv")
+        config=GasUsageConfig("2026-10","2026-10")
+        cache=self.root/"cache.sqlite3"
+        calculate_monthly_usage(self.root,config,period_cache=cache)
+        outside=self.root/"TUBE01_261101_0.csv"
+        outside.write_bytes(b"unreadable outside period")
+        with patch("gas_usage.read_flow_csv",side_effect=AssertionError("Unrelated month invalidated cache")), \
+             patch("gas_usage.read_time_bounds",side_effect=AssertionError("Unexpected time probe")):
+            reused=calculate_monthly_usage(self.root,config,period_cache=cache)
+        self.assertTrue(reused.settings.set_index("Setting").loc["Result cache","Value"].startswith("Reused"))
+        self.assertEqual(reused.settings.set_index("Setting").loc["Scanned files","Value"],2)
+        self.assertEqual(reused.settings.set_index("Setting").loc["Skipped outside period","Value"],1)
+        added=self.write(log(["2026-10-02 00:00:00","2026-10-02 00:01:00"]),name="TUBE01_261002_0.csv")
+        with patch("gas_usage.read_flow_csv",wraps=read_flow_csv) as reader:
+            changed=calculate_monthly_usage(self.root,config,period_cache=cache)
+        self.assertEqual([c.args[0] for c in reader.call_args_list],[added])
+        self.assertAlmostEqual(changed.monthly.iloc[0]["N2 (ft³)"],2)
 
     def test_month_export_slices_range_without_mutating_original(self):
         self.write(log(["2026-01-31 23:59:30", "2026-02-01 00:00:30"]))
@@ -480,6 +565,41 @@ class GasUsageUiTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_filename_filter_is_default_and_reaches_worker_and_saved_settings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            log(["2026-10-01 00:00:00","2026-10-01 00:01:00"]).to_csv(root/"TUBE01_261001_0.csv",index=False)
+            settings=QSettings(str(root/"ui.ini"),QSettings.IniFormat)
+            dialog=GasUsageDialog(root,settings=settings)
+            try:
+                self.assertTrue(dialog.filename_filter.isChecked())
+                dialog.selected_month.setDate(QDate(2026,10,1))
+                dialog.start_calculation()
+                self.assertTrue(dialog.worker.config.filename_period)
+                loop=QEventLoop()
+                timer=QTimer()
+                timer.setSingleShot(True)
+                timer.timeout.connect(loop.quit)
+                dialog.worker.finished.connect(loop.quit)
+                timer.start(10000)
+                loop.exec()
+                timer.stop()
+                self.assertIsNone(dialog.worker)
+                self.assertAlmostEqual(dialog.result.monthly.iloc[0]["N2 (ft³)"],1)
+                self.assertTrue(settings.value("filename_period",type=bool))
+                dialog.filename_filter.setChecked(False)
+                self.assertIsNone(dialog.result)
+                dialog.restore_defaults()
+                self.assertTrue(dialog.filename_filter.isChecked())
+            finally:
+                if dialog.worker is not None:
+                    dialog.worker.requestInterruption()
+                    dialog.worker.wait()
+                    self.app.processEvents()
+                dialog.close()
+                dialog.deleteLater()
+                QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
+
     def test_close_waits_for_cancellation_before_destroying_worker(self):
         def slow_scan(root, config, progress, cancelled, **kwargs):
             while not cancelled():
@@ -489,6 +609,7 @@ class GasUsageUiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             settings = QSettings(str(Path(folder) / "ui.ini"), QSettings.IniFormat)
             dialog = GasUsageDialog(folder, settings=settings)
+            dialog.filename_filter.setChecked(False)  # Legacy recipe-log fixtures.
             with patch("gas_usage_dialog.calculate_monthly_usage", side_effect=slow_scan):
                 dialog.start_calculation()
                 loop = QEventLoop()
@@ -518,6 +639,7 @@ class GasUsageUiTests(unittest.TestCase):
             log(["2026-01-01 00:00:00", "2026-01-01 00:01:00"]).to_csv(root / "TUBE01_run.csv", index=False)
             settings = QSettings(str(root / "ui.ini"), QSettings.IniFormat)
             dialog = GasUsageDialog(root, settings=settings)
+            dialog.filename_filter.setChecked(False)  # Legacy recipe-log fixtures.
             dialog.month_from.setDate(QDate(2026, 1, 1))
             dialog.month_to.setDate(QDate(2026, 2, 1))
             dialog.start_calculation(scope="trend")
@@ -567,6 +689,7 @@ class GasUsageUiTests(unittest.TestCase):
                 log([f"2026-{month:02d}-01 00:00:00", f"2026-{month:02d}-01 00:01:00"],
                     n2=CM3_PER_FT3 * month).to_csv(root / f"TUBE01_{month}.csv", index=False)
             dialog = GasUsageDialog(root, settings=QSettings(str(root / "ui.ini"), QSettings.IniFormat))
+            dialog.filename_filter.setChecked(False)  # Legacy recipe-log fixtures.
             try:
                 self.assertEqual(dialog.tabs.count(), 4)
                 self.assertFalse(hasattr(dialog, "equipment_filter"))
@@ -634,10 +757,12 @@ class GasUsageUiTests(unittest.TestCase):
             settings = QSettings(str(Path(folder) / "ui.ini"), QSettings.IniFormat)
             settings.setValue("gap", 60)
             dialog = GasUsageDialog(folder, settings=settings)
+            dialog.filename_filter.setChecked(False)  # Legacy recipe-log fixtures.
             self.assertEqual(dialog.gap.value(), 0)
             dialog.deleteLater()
             settings.setValue("gap_limit_seconds", 120)
             restored = GasUsageDialog(folder, settings=settings)
+            restored.filename_filter.setChecked(False)  # Legacy recipe-log fixtures.
             self.assertEqual(restored.gap.value(), 120)
             restored.deleteLater()
             QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
@@ -650,9 +775,10 @@ class GasUsageUiTests(unittest.TestCase):
                     times = [f"2026-{month}-01 00:00:00", f"2026-{month}-01 00:01:00"]
                     log(times, n2=CM3_PER_FT3 * multiplier * tube, tube=tube).to_csv(
                         root / f"TUBE0{tube}_{month}.csv", index=False)
-            result = calculate_monthly_usage(root, GasUsageConfig("2026-01", "2026-02"))
+            result = calculate_monthly_usage(root, GasUsageConfig("2026-01", "2026-02", filename_period=False))
             settings = QSettings(str(root / "ui.ini"), QSettings.IniFormat)
             dialog = GasUsageDialog(root, settings=settings)
+            dialog.filename_filter.setChecked(False)  # Legacy recipe-log fixtures.
             try:
                 dialog._calculation_scope = "trend"
                 dialog.tabs.setCurrentIndex(1)

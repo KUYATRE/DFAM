@@ -10,7 +10,7 @@ import time
 import pandas as pd
 
 # Bump when accounting or result semantics change.
-RESULT_CACHE_VERSION = "v3.05-2"
+RESULT_CACHE_VERSION = "v3.06-1"
 FRAME_NAMES = ("tubes", "monthly", "issues", "files", "settings", "channels")
 
 
@@ -30,6 +30,15 @@ def source_fingerprint(paths):
     except OSError:
         return None
     return digest.hexdigest()
+
+
+def selection_fingerprint(paths, identities, rejected_names):
+    """Only stat selected files; other months' contents cannot change this result."""
+    fingerprint = source_fingerprint(paths)
+    if fingerprint is None:
+        return None
+    payload = [fingerprint, sorted(identities), rejected_names]
+    return hashlib.sha256(json.dumps(payload).encode("utf-8")).hexdigest()
 
 
 def load_result(cache_path, key, fingerprint):

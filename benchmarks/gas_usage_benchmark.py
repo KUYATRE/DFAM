@@ -32,10 +32,11 @@ def main():
     parser.add_argument("--end", required=True)
     parser.add_argument("--cache", type=Path)
     parser.add_argument("--background", action="store_true")
+    parser.add_argument("--legacy-names", action="store_true", help="Select old-format logs by actual timestamps")
     args = parser.parse_args()
     if sys.platform != "win32":
         parser.error("This memory counter is Windows-only.")
-    config = GasUsageConfig(args.start, args.end)
+    config = GasUsageConfig(args.start, args.end, filename_period=not args.legacy_names)
     start = time.perf_counter()
     if args.background:
         with background_resources():

@@ -8,7 +8,7 @@ from PySide6.QtCore import QDate, QMargins, QSettings, QStandardPaths, QThread, 
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtCharts import QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView, QValueAxis
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog,
+    QAbstractItemView, QDialog, QCheckBox,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMessageBox, QProgressBar, QPushButton,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
@@ -58,7 +58,7 @@ class GasUsageWorker(QThread):
 class GasUsageDialog(QDialog):
     def __init__(self, proc_log_dir, parent=None, settings=None):
         super().__init__(parent)
-        self.setWindowTitle("MONTHLY GAS FLOW · v3.05")
+        self.setWindowTitle("MONTHLY GAS FLOW · v3.06")
         self.resize(1180, 1000)
         self.settings = settings if settings is not None else QSettings("DFAM", "GasUsage")
         self.result = None
@@ -146,6 +146,11 @@ class GasUsageDialog(QDialog):
         browse.clicked.connect(self.browse)
         path_row.addWidget(browse)
         form.addRow("ProcLog 폴더", path_row)
+        self.filename_filter = QCheckBox("파일명으로 대상 월 선별 (TUBE##_YYMMDD_0/8/16.csv)")
+        self.filename_filter.setChecked(self.settings.value("filename_period", True, type=bool))
+        self.filename_filter.setToolTip("기본값: 파일명의 날짜로 선별하고 선택 파일만 읽습니다.\n"
+                                       "이름 형식이 다른 과거 로그는 해제하면 시간 컬럼으로 선별합니다.")
+        form.addRow(self.filename_filter)
         self.n2_edit = QLineEdit(self.settings.value("n2", ", ".join(DEFAULT_N2), type=str))
         self.o2_edit = QLineEdit(self.settings.value("o2", ", ".join(DEFAULT_O2), type=str))
         for edit in (self.n2_edit, self.o2_edit):
@@ -225,6 +230,7 @@ class GasUsageDialog(QDialog):
         self.month_from.dateChanged.connect(self.invalidate_trend)
         self.month_to.dateChanged.connect(self.invalidate_trend)
         self.gap.valueChanged.connect(self.invalidate)
+        self.filename_filter.toggled.connect(self.invalidate)
         self.tube_filter.currentIndexChanged.connect(self.refresh_views)
         self.selected_month.dateChanged.connect(self.month_changed)
         self.tabs.currentChanged.connect(self.tab_changed)
@@ -368,6 +374,7 @@ class GasUsageDialog(QDialog):
         self.month_caption.setText(f"{month}  |  전체 Tube  |  {hint}")
 
     def restore_defaults(self):
+        self.filename_filter.setChecked(True)
         self.n2_edit.setText(", ".join(DEFAULT_N2))
         self.o2_edit.setText(", ".join(DEFAULT_O2))
         self.time_edit.setText("Time")
@@ -416,7 +423,8 @@ class GasUsageDialog(QDialog):
             start.toString("yyyy-MM"), end.toString("yyyy-MM"),
             tuple(s.strip() for s in self.n2_edit.text().split(",") if s.strip()),
             tuple(s.strip() for s in self.o2_edit.text().split(",") if s.strip()),
-            self.time_edit.text().strip(), self.gap.value() or None)
+            self.time_edit.text().strip(), self.gap.value() or None,
+            filename_period=self.filename_filter.isChecked())
         try:
             config.validate()
             if not Path(self.root_edit.text().strip()).is_dir() or not self.root_edit.text().strip():
@@ -440,9 +448,11 @@ class GasUsageDialog(QDialog):
         self.progress.setRange(0, 0)
         self._active_period = (config.start_month if config.start_month == config.end_month
                                else f"{config.start_month} ~ {config.end_month}")
-        self.status.setText(f"{self._active_period} · 대상 로그의 기록 기간을 확인합니다…")
+        phase = "파일명으로 대상 로그를 찾습니다…" if config.filename_period else "대상 로그의 기록 기간을 확인합니다…"
+        self.status.setText(f"{self._active_period} · {phase}")
         for key, value in (("n2", self.n2_edit.text()), ("o2", self.o2_edit.text()),
-                           ("time", self.time_edit.text()), ("gap_limit_seconds", self.gap.value())):
+                           ("time", self.time_edit.text()), ("gap_limit_seconds", self.gap.value()),
+                           ("filename_period", self.filename_filter.isChecked())):
             self.settings.setValue(key, value)
         self.worker = GasUsageWorker(self.root_edit.text().strip(), config, self)
         self.worker.progress.connect(self.update_progress)
@@ -498,6 +508,9 @@ class GasUsageDialog(QDialog):
         prefix = "집계 완료" if has_volume else "선택 기간에 집계 가능한 기록이 없습니다"
         values = result.settings.set_index("Setting")["Value"]
         skipped = int(values.get("Skipped outside period", 0))
+        rejected = int(values.get("Rejected filename format", 0))
+        if rejected:
+            prefix += f" · 파일명 형식 제외 {rejected:,}개"
         if str(values.get("Result cache", "")).startswith("Reused"):
             prefix += " (변경 없음 · 결과 재사용)"
         period = values["Months"].split(" ~ ")

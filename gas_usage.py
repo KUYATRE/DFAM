@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from gas_usage_storage import CSV_CHUNK_ROWS, DiskIntervalStore
 from gas_usage_cache import (query_key, source_fingerprint, load_result, save_result,
-                             component_key, load_component, save_component)
+                             component_key, load_component, save_component, selection_fingerprint)
 
 
 # Exact geometric conversion; retain the standard conditions of the source sccm.
@@ -36,6 +36,7 @@ class GasUsageConfig:
     o2_columns: tuple[str, ...] = DEFAULT_O2
     time_column: str = "Time"
     max_gap_seconds: float | None = None
+    filename_period: bool = True
 
     def validate(self):
         start, end = pd.Period(self.start_month, "M"), pd.Period(self.end_month, "M")
@@ -76,6 +77,20 @@ def tube_from_path(path):
         if match:
             return f"TUBE{int(match[1]):02d}"
     return None
+
+
+def proc_log_period(path):
+    """TUBE##_YYMMDD_0/8/16, with a fixed eight-hour recording window."""
+    match = re.fullmatch(r"TUBE(\d+)_(\d{6})_(\d{1,2})", Path(path).stem, re.IGNORECASE)
+    if match is None or int(match[1]) < 1 or int(match[3]) not in (0, 8, 16):
+        return None
+    date = match[2]
+    try:
+        start = pd.Timestamp(year=2000 + int(date[:2]), month=int(date[2:4]),
+                             day=int(date[4:]), hour=int(match[3]))
+    except ValueError:
+        return None
+    return f"TUBE{int(match[1]):02d}", (start.value, (start + pd.Timedelta(hours=8)).value)
 
 
 def read_flow_csv(path, config, encoding="utf-8-sig"):
@@ -241,7 +256,7 @@ def flow_intervals(df, path, tube, config, issues, *, carried=False):
     return frames, record
 
 
-def stage_flow_file(store, path, file_id, tube, config, cancelled, cooperate):
+def stage_flow_file(store, path, file_id, tube, config, cancelled, cooperate, expected_bounds=None):
     """Stage one CSV atomically; retain one boundary row between read chunks."""
     for encoding in ("utf-8-sig", "cp949", "euc-kr"):
         store.begin_file()
@@ -278,6 +293,9 @@ def stage_flow_file(store, path, file_id, tube, config, cancelled, cooperate):
                 raise ValueError("시간 컬럼이 없거나 기록이 2행 미만입니다.")
             if not all(tube_ids.values()):
                 raise ValueError("Tube ID와 파일명/폴더의 Tube가 일치하지 않습니다.")
+            if expected_bounds is not None and pd.notna(first):
+                if first.value < expected_bounds[0] or last.value > expected_bounds[1]:
+                    raise ValueError("파일명의 8시간 기록 범위를 벗어난 시각이 있습니다. 파일명과 시간 컬럼을 확인하세요.")
             store.finish_file()
             return [str(path), tube, count, str(first), str(last)], issues
         except UnicodeDecodeError:
@@ -460,39 +478,69 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
     paths.sort()
     if cancelled():
         raise CalculationCancelled()
+    issues, records, identities = IssueCounts(), [], set()
+    candidates, candidate_bounds, rejected_names = [], [], []
+    period_start = pd.Period(config.start_month, "M").start_time.value
+    period_end = (pd.Period(config.end_month, "M") + 1).start_time.value
+    if config.filename_period:
+        for i, path in enumerate(paths):
+            if cancelled():
+                raise CalculationCancelled()
+            if i % 100 == 0:
+                progress(i, len(paths), "파일명으로 대상 월 선별 (CSV 내용은 열지 않음)")
+            parsed = proc_log_period(path)
+            if parsed is None:
+                rejected_names.append(str(path))
+                issues.append([str(path), "파일명 형식 제외: TUBE##_YYMMDD_0/8/16.csv 형식이 아닙니다", 1])
+                continue
+            tube, bounds = parsed
+            identities.add(tube)
+            if period_start <= bounds[0] < period_end:
+                candidates.append(path)
+                candidate_bounds.append(bounds)
+
+    def current_fingerprint():
+        if period_cache is None:
+            return None
+        if config.filename_period:
+            return selection_fingerprint(candidates, identities, rejected_names)
+        return source_fingerprint(paths)
+
     key = query_key(root, config)
-    fingerprint = source_fingerprint(paths) if period_cache is not None else None
+    fingerprint = current_fingerprint()
     cached = load_result(period_cache, key, fingerprint)
     if cached is not None:
         if cancelled():
             raise CalculationCancelled()
         result = GasUsageResult(**cached)
         result.settings.loc[result.settings["Setting"] == "Result cache", "Value"] = "Reused (source metadata unchanged)"
+        if config.filename_period:
+            for setting, value in (("Scanned files", len(paths)),
+                                   ("Skipped outside period", len(paths) - len(candidates) - len(rejected_names)),
+                                   ("Rejected filename format", len(rejected_names))):
+                result.settings.loc[result.settings["Setting"] == setting, "Value"] = value
         progress(len(paths), len(paths), "변경 없는 로그의 집계 결과 재사용")
         return result
-    issues, records, identities = IssueCounts(), [], set()
-    candidates, candidate_bounds = [], []
-    period_start = pd.Period(config.start_month, "M").start_time.value
-    period_end = (pd.Period(config.end_month, "M") + 1).start_time.value
-    index = LogPeriodIndex(period_cache)
-    try:
-        for i, path in enumerate(paths):
-            if cancelled():
-                raise CalculationCancelled()
-            progress(i, len(paths), "기록 기간 확인 (최초/변경 파일의 시간 컬럼만 확인)")
-            try:
-                bounds = index.bounds(path, config.time_column, cancelled, cooperate)
-            except (ValueError, OSError, pd.errors.ParserError):
-                bounds = None  # Let the regular reader report unusable files.
-            if bounds is not None and (bounds[1] < period_start or bounds[0] >= period_end):
-                tube = tube_from_path(path)
-                if tube is not None:
-                    identities.add(tube)
-                continue
-            candidates.append(path)
-            candidate_bounds.append(bounds)
-    finally:
-        index.close()
+    if not config.filename_period:
+        index = LogPeriodIndex(period_cache)
+        try:
+            for i, path in enumerate(paths):
+                if cancelled():
+                    raise CalculationCancelled()
+                progress(i, len(paths), "기록 기간 확인 (이전 형식: 시간 컬럼 확인)")
+                try:
+                    bounds = index.bounds(path, config.time_column, cancelled, cooperate)
+                except (ValueError, OSError, pd.errors.ParserError):
+                    bounds = None
+                if bounds is not None and (bounds[1] < period_start or bounds[0] >= period_end):
+                    tube = tube_from_path(path)
+                    if tube is not None:
+                        identities.add(tube)
+                    continue
+                candidates.append(path)
+                candidate_bounds.append(bounds)
+        finally:
+            index.close()
     totals = IntervalTotals(config)
     completed = 0
     direct_files, disk_files, reused_files = 0, 0, 0
@@ -505,10 +553,12 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
             component_issues.append([str(path), "Tube를 파일명/폴더에서 식별할 수 없어 제외", 1])
             return
         try:
-            record, file_issues = stage_flow_file(store, path, i, tube, config, cancelled, cooperate)
             known = candidate_bounds[i]
+            record, file_issues = stage_flow_file(
+                store, path, i, tube, config, cancelled, cooperate,
+                expected_bounds=known if config.filename_period else None)
             lo, hi = pd.Timestamp(record[3]), pd.Timestamp(record[4])
-            if known is not None and pd.notna(lo) and (lo.value < known[0] or hi.value > known[1]):
+            if not config.filename_period and known is not None and pd.notna(lo) and (lo.value < known[0] or hi.value > known[1]):
                 raise SourceChanged("로그의 기록 기간이 집계 중 변경되었습니다. 다시 집계하세요.")
             component_issues.extend(file_issues)
             records.append(record)
@@ -576,9 +626,11 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
     tubes, monthly = summarize_usage(integrated, identities, config)
     settings = pd.DataFrame([
         ["Root", str(root.resolve())], ["Months", f"{config.start_month} ~ {config.end_month}"],
-        ["File selection", "Actual timestamp bounds intersect query; filenames do not determine the period"],
+        ["File selection", "Filename TUBE##_YYMMDD_0/8/16; select start date in query; eight-hour windows"
+         if config.filename_period else "Legacy mode: actual timestamp bounds intersect query"],
         ["Scanned files", len(paths)], ["Candidate files", len(candidates)],
-        ["Skipped outside period", len(paths) - len(candidates)],
+        ["Skipped outside period", len(paths) - len(candidates) - len(rejected_names)],
+        ["Rejected filename format", len(rejected_names)],
         ["Processing", f"Streaming {CSV_CHUNK_ROWS} rows per batch; isolated ordered files integrate directly; disk ordering only for overlaps"],
         ["Direct streaming files", direct_files], ["Disk ordering files", disk_files],
         ["Reused files", reused_files],
@@ -596,7 +648,7 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
     result = GasUsageResult(tubes, monthly, pd.DataFrame(list(issues), columns=ISSUE_COLUMNS),
                           pd.DataFrame(records, columns=["File", "Tube", "Rows", "First", "Last"]),
                           settings, channels)
-    if fingerprint is not None and source_fingerprint(paths) == fingerprint:
+    if fingerprint is not None and current_fingerprint() == fingerprint:
         save_result(period_cache, key, fingerprint, result)
     return result
 
