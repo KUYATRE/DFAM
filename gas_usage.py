@@ -1,4 +1,4 @@
-"""Integrate recorded gas flow without extending it beyond observed intervals."""
+"""Integrate recorded gas flow, with one assumed second per repeated-time row."""
 
 from collections import Counter
 from dataclasses import dataclass
@@ -205,7 +205,7 @@ class LogPeriodIndex:
 
 
 def flow_intervals(df, path, tube, config, issues, *, carried=False):
-    """Keep each original adjacent pair; never bridge invalid rows or files."""
+    """Integrate accepted adjacent rows and count repeated timestamps as samples."""
     file = str(path)
 
     def issue(message, count=1):
@@ -223,7 +223,15 @@ def flow_intervals(df, path, tube, config, issues, *, carried=False):
     pair = valid_time[:-1] & valid_time[1:]
     seconds = np.zeros(len(df) - 1)
     seconds[pair] = (ns[1:][pair] - ns[:-1][pair]) / 1e9
-    issue("중복 또는 역행 시각 구간 제외", (pair & (seconds <= 0)).sum())
+    repeated = pair & (seconds == 0)
+    issue("중복 시각 행: 각 행의 유량을 1초로 가정하여 집계", repeated.sum())
+    # Occurrence numbers survive chunk boundaries and distinguish repeated rows
+    # from duplicate copies of the same file in the disk overlap path.
+    if "_gas_repeat" in df:
+        ordinal = df["_gas_repeat"].to_numpy(dtype=np.int64)
+    else:
+        positions = np.arange(len(df))
+        ordinal = positions - np.maximum.accumulate(np.where(np.r_[True, ~repeated], positions, 0))
     valid = pair & (seconds > 0)
     if config.max_gap_seconds is not None:
         issue(f"{config.max_gap_seconds:g}초 초과 기록 간격 제외", (pair & (seconds > config.max_gap_seconds)).sum())
@@ -246,11 +254,23 @@ def flow_intervals(df, path, tube, config, issues, *, carried=False):
         if mask.any():
             intervals = pd.DataFrame({"Tube": tube, "Gas": gas,
                 "start": ns[:-1][mask], "end": ns[1:][mask],
-                "q0": rates[:-1][mask], "q1": rates[1:][mask], "File": file})
+                "q0": rates[:-1][mask], "q1": rates[1:][mask], "File": file, "repeat": 0})
             for index, column in enumerate(columns):
                 intervals[f"channel0:{column}"] = values[:-1, index][mask]
                 intervals[f"channel1:{column}"] = values[1:, index][mask]
             frames.append(intervals)
+        # These are extra assumed seconds, not synthetic wall-clock spans:
+        # overlap removal must not erase them against the next normal interval.
+        mask = repeated & good[1:] & (ns[1:] >= bounds[0]) & (ns[1:] < bounds[1])
+        if mask.any():
+            samples = pd.DataFrame({"Tube": tube, "Gas": gas,
+                "start": ns[1:][mask], "end": ns[1:][mask],
+                "q0": rates[1:][mask], "q1": rates[1:][mask], "File": file,
+                "repeat": ordinal[1:][mask]})
+            for index, column in enumerate(columns):
+                samples[f"channel0:{column}"] = values[1:, index][mask]
+                samples[f"channel1:{column}"] = values[1:, index][mask]
+            frames.append(samples)
     first, last = times.min(), times.max()
     record = [file, tube, len(df), str(first), str(last)]
     return frames, record
@@ -262,6 +282,8 @@ def stage_flow_file(store, path, file_id, tube, config, cancelled, cooperate, ex
         store.begin_file()
         issues = IssueCounts()
         count, carry, first, last = 0, None, pd.NaT, pd.NaT
+        last_valid = np.iinfo(np.int64).min
+        last_repeat = 0
         tube_ids = {}
         try:
             with read_flow_csv(path, config, encoding) as reader:
@@ -272,13 +294,49 @@ def stage_flow_file(store, path, file_id, tube, config, cancelled, cooperate, ex
                     chunk.columns = [normalize_column(c) for c in chunk.columns]
                     if chunk.columns.duplicated().any():
                         raise ValueError("공백 제거 후 중복되는 컬럼이 있습니다.")
+                    count += len(chunk)
+                    if config.time_column not in chunk:
+                        raise ValueError("시간 컬럼이 없습니다.")
+                    times = parse_times(chunk[config.time_column])
+                    if expected_bounds is not None:
+                        outside = times.notna() & ((times < pd.Timestamp(expected_bounds[0])) |
+                                                  (times > pd.Timestamp(expected_bounds[1])))
+                        if outside.any():
+                            issues.append([str(path), "파일명의 8시간 기록 범위를 벗어난 행 제외", int(outside.sum())])
+                        chunk = chunk.loc[~outside].copy()
+                        times = times.loc[~outside]
+                    ns = times.to_numpy(dtype="datetime64[ns]").astype("int64")
+                    if not len(ns):
+                        continue
+                    high = np.maximum.accumulate(np.maximum(ns, last_valid))
+                    prior = np.r_[last_valid, high[:-1]]
+                    reverse = times.notna().to_numpy() & (ns < prior)
+                    if reverse.any():
+                        issues.append([str(path), "역행 시각 행 제외 (직전 정상 시각보다 이전)", int(reverse.sum())])
+                    chunk = chunk.loc[~reverse].copy()
+                    if chunk.empty:
+                        continue
+                    accepted_ns = ns[~reverse]
+                    valid_indices = np.flatnonzero(accepted_ns != np.iinfo(np.int64).min)
+                    ordinals = np.zeros(len(chunk), dtype=np.int64)
+                    if len(valid_indices):
+                        valid_ns = accepted_ns[valid_indices]
+                        positions = np.arange(len(valid_ns))
+                        starts = np.r_[True, valid_ns[1:] != valid_ns[:-1]]
+                        group_start = np.maximum.accumulate(np.where(starts, positions, 0))
+                        ranks = positions - group_start
+                        if valid_ns[0] == last_valid:
+                            ranks[group_start == 0] += last_repeat + 1
+                        ordinals[valid_indices] = ranks
+                        last_repeat = int(ranks[-1])
+                        last_valid = int(valid_ns[-1])
+                    chunk["_gas_repeat"] = ordinals
                     for column in ("Tube ID", "TubeID"):
                         if column in chunk:
                             ids = pd.to_numeric(chunk[column], errors="coerce").dropna()
                             tube_ids[column] = tube_ids.get(column, False) or not ids.empty
                             if (ids != int(tube[4:])).any():
                                 raise ValueError("Tube ID와 파일명/폴더의 Tube가 일치하지 않습니다.")
-                    count += len(chunk)
                     block = pd.concat([carry, chunk], ignore_index=True) if carry is not None else chunk
                     pieces, record = flow_intervals(block, path, tube, config, issues, carried=carry is not None)
                     for frame in pieces:
@@ -288,14 +346,11 @@ def stage_flow_file(store, path, file_id, tube, config, cancelled, cooperate, ex
                     if pd.notna(lo):
                         first = lo if pd.isna(first) else min(first, lo)
                         last = hi if pd.isna(last) else max(last, hi)
-                    carry = chunk.iloc[-1:].copy()  # A view would retain the entire chunk.
+                    carry = block.iloc[-1:].copy()  # Keep the repeat ordinal, not the entire chunk.
             if count < 2:
                 raise ValueError("시간 컬럼이 없거나 기록이 2행 미만입니다.")
             if not all(tube_ids.values()):
                 raise ValueError("Tube ID와 파일명/폴더의 Tube가 일치하지 않습니다.")
-            if expected_bounds is not None and pd.notna(first):
-                if first.value < expected_bounds[0] or last.value > expected_bounds[1]:
-                    raise ValueError("파일명의 8시간 기록 범위를 벗어난 시각이 있습니다. 파일명과 시간 컬럼을 확인하세요.")
             store.finish_file()
             return [str(path), tube, count, str(first), str(last)], issues
         except UnicodeDecodeError:
@@ -320,6 +375,16 @@ class IntervalTotals:
         self.config = config
         self.months = pd.period_range(config.start_month, config.end_month, freq="M")
         self.values = {}
+
+    def add_repeated(self, tube, gas, timestamps, rates, channels):
+        """One second at each repeated row's own rate, assigned to its timestamp month."""
+        for month in self.months:
+            keep = (timestamps >= month.start_time.value) & (timestamps < (month + 1).start_time.value)
+            if keep.any():
+                values = np.r_[rates[keep].sum() / 60 / CM3_PER_FT3,
+                               keep.sum() / 3600,
+                               channels[keep].sum(axis=0) / 60 / CM3_PER_FT3]
+                self.values.setdefault((tube, gas, str(month)), np.zeros(len(values)))[:] += values
 
     def add(self, tube, gas, start, end, q0, q1, channels, unique_start=None):
         n = channels.shape[1] // 2
@@ -379,6 +444,10 @@ class DirectIntervalStore:
     def append(self, frame, file_id, columns):
         tube, gas = frame["Tube"].iloc[0], frame["Gas"].iloc[0]
         start, end = frame["start"].to_numpy(), frame["end"].to_numpy()
+        if (frame["repeat"] > 0).all():
+            channels = np.column_stack([frame[f"channel1:{c}"].to_numpy() for c in columns])
+            self.totals.add_repeated(tube, gas, start, frame["q1"].to_numpy(), channels)
+            return
         if start[0] < self.previous_end.get(gas, np.iinfo(np.int64).min) or (start[1:] < end[:-1]).any():
             raise NeedsDiskOrdering()
         self.previous_end[gas] = int(end[-1])
@@ -404,7 +473,9 @@ def overlap_components(paths, bounds):
                 components.append(group)
                 group = []
             group.append(index)
-            covered = end if len(group) == 1 else max(covered, end)
+            # Equal-time-only files still contain one-second assumed samples.
+            extent = max(end, start + 1)
+            covered = extent if len(group) == 1 else max(covered, extent)
         if group:
             components.append(group)
     return components
@@ -417,6 +488,7 @@ def integrate_intervals(store, config, issues, paths, cancelled=lambda: False, c
         columns = config.n2_columns if gas == "N2" else config.o2_columns
         n = len(columns)
         previous_end = np.iinfo(np.int64).min
+        previous_repeat = None
         for batch in store.batches(tube, gas, CSV_CHUNK_ROWS):
             cooperate()
             if cancelled():
@@ -427,6 +499,23 @@ def integrate_intervals(store, config, issues, paths, cancelled=lambda: False, c
             q0 = np.array([r[3] for r in batch])
             q1 = np.array([r[4] for r in batch])
             channels = np.frombuffer(b"".join(r[5] for r in batch), dtype="<f8").reshape(-1, 2 * n)
+            ordinal = np.array([r[6] for r in batch], dtype=np.int64)
+            repeated = ordinal > 0
+            if repeated.any():
+                indices = np.flatnonzero(repeated)
+                keep = np.ones(len(indices), dtype=bool)
+                for j, i in enumerate(indices):
+                    key = (int(start[i]), int(ordinal[i]))
+                    if key == previous_repeat:
+                        keep[j] = False
+                        issues.append([str(paths[files[i]]), f"{gas} 다른 파일의 동일 중복 시각 행은 한 번만 집계", 1])
+                    previous_repeat = key
+                selected = indices[keep]
+                totals.add_repeated(tube, gas, start[selected], q1[selected], channels[selected, n:])
+            normal = ~repeated
+            if not normal.any():
+                continue
+            start, end, files, q0, q1, channels = (a[normal] for a in (start, end, files, q0, q1, channels))
             covered = np.maximum.accumulate(end)
             prior_end = np.concatenate(([previous_end], covered[:-1]))
             prior_end = np.maximum(prior_end, previous_end)
@@ -638,7 +727,9 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
         ["Time", config.time_column], ["N2 sccm columns", ", ".join(config.n2_columns)],
         ["O2 sccm columns", ", ".join(config.o2_columns)],
         ["Maximum gap (s)", "Unlimited" if config.max_gap_seconds is None else config.max_gap_seconds],
-        ["Formula", "sum((q0+q1)/2 * seconds/60) / 28316.846592"],
+        ["Formula", "(sum((q0+q1)/2 * actual_seconds/60) + sum(repeated_row_rate/60)) / 28316.846592"],
+        ["Repeated timestamps", "Each additional same-time row contributes one assumed second at its own rate, in its timestamp month"],
+        ["Excluded rows", "Remove backwards rows relative to last accepted time, and rows outside filename eight-hour window; integrate remaining adjacent rows"],
         ["Volume basis", "ft³ at the same standard conditions as the source sccm; no T/P correction"],
         ["Scope", "Recorded process intervals only; excludes unlogged idle/purge usage and final-sample extrapolation"],
         ["Overlap", "Count once per Tube/gas in this single-machine log folder; earliest start then file path wins; uncovered tails retained"],

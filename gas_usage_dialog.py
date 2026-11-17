@@ -58,7 +58,7 @@ class GasUsageWorker(QThread):
 class GasUsageDialog(QDialog):
     def __init__(self, proc_log_dir, parent=None, settings=None):
         super().__init__(parent)
-        self.setWindowTitle("MONTHLY GAS FLOW · v3.06")
+        self.setWindowTitle("MONTHLY GAS FLOW · v3.07")
         self.resize(1180, 1000)
         self.settings = settings if settings is not None else QSettings("DFAM", "GasUsage")
         self.result = None

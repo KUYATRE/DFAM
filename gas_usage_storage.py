@@ -35,8 +35,8 @@ class DiskIntervalStore:
             # The on-disk primary key replaces an all-records in-memory sort.
             self.connection.execute("""CREATE TABLE spans (
                 tube TEXT, gas TEXT, start INTEGER, file_id INTEGER, end INTEGER,
-                seq INTEGER, q0 REAL, q1 REAL, channels BLOB,
-                PRIMARY KEY(tube, gas, start, file_id, end, seq)) WITHOUT ROWID""")
+                seq INTEGER, q0 REAL, q1 REAL, channels BLOB, repeat INTEGER,
+                PRIMARY KEY(tube, gas, start, repeat, file_id, end, seq)) WITHOUT ROWID""")
             self.connection.set_progress_handler(lambda: int(self.cancelled()), 2000)
             return self
         except BaseException:
@@ -74,17 +74,17 @@ class DiskIntervalStore:
         values = np.column_stack([frame[f"channel{endpoint}:{c}"].to_numpy()
                                   for endpoint in (0, 1) for c in channels]).astype("<f8", copy=False)
         def rows():
-            for (start, end, q0, q1), channel in zip(
-                    frame[["start", "end", "q0", "q1"]].itertuples(index=False, name=None), values):
-                yield (tube, gas, start, file_id, end, next(self.sequence), q0, q1, channel.tobytes())
-        self.connection.executemany("INSERT INTO spans VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows())
+            for (start, end, q0, q1, repeat), channel in zip(
+                    frame[["start", "end", "q0", "q1", "repeat"]].itertuples(index=False, name=None), values):
+                yield (tube, gas, start, file_id, end, next(self.sequence), q0, q1, channel.tobytes(), repeat)
+        self.connection.executemany("INSERT INTO spans VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows())
 
     def groups(self):
         return self.connection.execute("SELECT DISTINCT tube, gas FROM spans ORDER BY tube, gas").fetchall()
 
     def batches(self, tube, gas, size=CSV_CHUNK_ROWS):
         with closing(self.connection.execute(
-                "SELECT start, end, file_id, q0, q1, channels FROM spans "
-                "WHERE tube=? AND gas=? ORDER BY start, file_id, end, seq", (tube, gas))) as cursor:
+                "SELECT start, end, file_id, q0, q1, channels, repeat FROM spans "
+                "WHERE tube=? AND gas=? ORDER BY start, repeat, file_id, end, seq", (tube, gas))) as cursor:
             while rows := cursor.fetchmany(size):
                 yield rows
