@@ -10,7 +10,7 @@ from qfluentwidgets import (
     CalendarPicker, ScrollArea, FluentStyleSheet, setTheme, setThemeColor, setFontFamilies, Theme,
 )
 
-APP_VERSION = "3.08"
+APP_VERSION = "3.09"
 
 
 def configure_fluent(app):

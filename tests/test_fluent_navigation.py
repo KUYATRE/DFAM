@@ -11,7 +11,7 @@ import pandas as pd
 from PySide6.QtCore import QCoreApplication, QDate, QEvent, QSettings, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
-from fluent_ui import configure_fluent
+from fluent_ui import APP_VERSION, configure_fluent
 from gas_usage import CalculationCancelled, CM3_PER_FT3, DEFAULT_N2, DEFAULT_O2
 from main import MainWindow
 
@@ -47,6 +47,14 @@ class FluentNavigationTests(unittest.TestCase):
         while not predicate() and time.monotonic() < deadline:
             QTest.qWait(10)
         self.assertTrue(predicate())
+
+    def test_window_title_build_name_and_release_notes_use_same_version(self):
+        repo = Path(__file__).resolve().parents[1]
+        self.assertEqual(self.window.windowTitle(), f"Log Plotter {APP_VERSION}")
+        self.assertIn(f"name='LogPlotter_v{APP_VERSION}'", (repo / "CsvPlotApp.spec").read_text(encoding="utf-8"))
+        release = (repo / "RELEASES.md").read_text(encoding="utf-8")
+        self.assertTrue(next(line for line in release.splitlines() if line.startswith("### v"))
+                        .startswith(f"### v{APP_VERSION} "))
 
     def test_navigation_preserves_calculated_gas_and_graph_selection(self):
         data = pd.DataFrame({"Time": ["2026-10-01 00:00:00", "2026-10-01 00:01:00"]})

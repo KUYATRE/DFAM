@@ -448,14 +448,18 @@ class GasUsageTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(observations,[True,True])
 
-    def test_filename_month_filter_never_opens_other_months_or_probes_time_columns(self):
+    def test_filename_month_filter_only_opens_requested_and_adjacent_boundary_shifts(self):
         import gas_usage
         selected = []
         for hour in (0, 8, 16):
             start = pd.Timestamp("2026-10-01") + pd.Timedelta(hours=hour)
             selected.append(self.write(log([str(start), str(start+pd.Timedelta(hours=8))]),
                                        name=f"TUBE01_261001_{hour}.csv"))
-        for name in ("TUBE01_260930_16.csv", "TUBE01_261101_0.csv", "TUBE01_260801_8.csv"):
+        selected.append(self.write(log(["2026-11-01 00:00:00", "2026-11-01 00:00:30"]),
+                                   name="TUBE01_261101_0.csv"))
+        selected.append(self.write(log(["2026-09-30 23:59:30", "2026-10-01 00:00:00"]),
+                                   name="TUBE01_260930_16.csv"))
+        for name in ("TUBE01_260930_8.csv", "TUBE01_261101_8.csv", "TUBE01_260801_8.csv"):
             (self.root/name).write_bytes(b"not a readable CSV")
         events = []
         with patch("gas_usage.read_time_bounds", side_effect=AssertionError("Unexpected timestamp probe")), \
@@ -465,11 +469,107 @@ class GasUsageTests(unittest.TestCase):
             result = calculate_monthly_usage(self.root,GasUsageConfig("2026-10","2026-10"),
                                              progress=lambda *args: events.append(args))
         self.assertEqual({c.args[0] for c in reader.call_args_list},set(selected))
-        self.assertEqual(reader.call_count,3)
+        self.assertEqual(reader.call_count,5)
         self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"],1440)
-        self.assertEqual(result.settings.set_index("Setting").loc["Skipped outside period","Value"],3)
+        settings = result.settings.set_index("Setting")["Value"]
+        self.assertEqual(settings["Skipped outside period"], 3)
+        self.assertEqual(settings["Prior-month boundary files"], 1)
+        self.assertEqual(settings["Next-month boundary files"], 1)
         self.assertTrue(result.issues.empty)
         self.assertTrue(any("파일명으로 대상 월 선별" in event[2] for event in events))
+
+    def test_filename_discovery_uses_directory_entries_and_stats_only_selected_logs(self):
+        import gas_usage_cache
+        times = ["2026-10-01 00:00:00", "2026-10-01 00:01:00"]
+        selected = self.write(log(times), name="nested/TUBE01_261001_0.CSV")
+        outside = self.write(log(times), name="nested/TUBE01_260901_0.csv")
+        (self.root / "nested" / "not-a-log.csv").mkdir()
+        (self.root / ".csv").write_text("not a CSV path suffix")
+        (self.root / "readme.txt").write_text("not a log")
+        calls = []
+
+        def stamp(path):
+            calls.append(path)
+            return source_stamp(path)
+
+        source_stamp = gas_usage_cache.source_stamp
+        cache = self.root / "usage.sqlite3"
+        config = GasUsageConfig("2026-10", "2026-10")
+        with patch("gas_usage.source_stamp", side_effect=stamp), \
+             patch("gas_usage_cache.source_stamp", side_effect=stamp), \
+             patch.object(Path, "is_file", autospec=True, side_effect=Path.is_file) as is_file:
+            result = calculate_monthly_usage(self.root, config, period_cache=cache)
+        self.assertEqual(calls, [selected, selected, selected])
+        self.assertNotIn(outside, calls)
+        self.assertTrue(all(call.args[0] == cache for call in is_file.call_args_list))
+        self.assertEqual(result.files["File"].tolist(), [str(selected)])
+        self.assertEqual(result.settings.set_index("Setting").loc["Scanned files", "Value"], 2)
+        self.assertTrue(result.issues.empty)
+
+    def test_filename_csv_chunks_parse_timestamps_once_including_boundary_carry(self):
+        import gas_usage
+        self.write(log(["2026-10-31 23:59:58", "2026-10-31 23:59:58",
+                        "2026-10-31 23:59:57", "invalid",
+                        "2026-10-31 23:59:59", "2026-11-01 00:00:00"]),
+                   name="TUBE01_261031_16.csv")
+        config = GasUsageConfig("2026-10", "2026-11")
+        with patch("gas_usage.CSV_CHUNK_ROWS", 2), \
+             patch("gas_usage.parse_times", wraps=gas_usage.parse_times) as parse:
+            result = calculate_monthly_usage(self.root, config)
+        self.assertEqual(parse.call_count, 3)
+        self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], 2 / 60)
+        self.assertTrue(pd.isna(result.monthly.iloc[1]["N2 (ft³)"]))
+        self.assertEqual(result.files.iloc[0]["First"], "2026-10-31 23:59:58")
+        self.assertEqual(result.files.iloc[0]["Last"], "2026-11-01 00:00:00")
+        self.assertEqual(result.issues["Count"].tolist(), [1, 1, 1])
+
+    def test_partial_cache_batches_writes_and_never_reuses_log_changed_during_calculation(self):
+        import gas_usage
+        import gas_usage_cache
+        times = ["2026-10-01 00:00:00", "2026-10-01 00:01:00"]
+        for tube in range(1, 4):
+            self.write(log(times, tube=tube), name=f"TUBE{tube:02d}_261001_0.csv")
+        config = GasUsageConfig("2026-10", "2026-10")
+        cache = self.root / "usage.sqlite3"
+        changed = False
+
+        def update_while_calculating(done, total, message):
+            nonlocal changed
+            if message.endswith("TUBE01_261001_0.csv") and not changed:
+                self.write(log(times, n2=2 * CM3_PER_FT3), name="TUBE01_261001_0.csv")
+                changed = True
+
+        with patch.object(gas_usage_cache.ComponentCache, "flush", autospec=True,
+                          side_effect=gas_usage_cache.ComponentCache.flush) as flush:
+            result = calculate_monthly_usage(self.root, config, update_while_calculating, period_cache=cache)
+        self.assertTrue(changed)
+        self.assertEqual(flush.call_count, 1)
+        self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], 4)
+        with patch("gas_usage.read_flow_csv", wraps=gas_usage.read_flow_csv) as reader:
+            updated = calculate_monthly_usage(self.root, config, period_cache=cache)
+        self.assertEqual([c.args[0].name for c in reader.call_args_list], ["TUBE01_261001_0.csv"])
+        for attribute in ("tubes", "monthly", "channels", "files", "issues"):
+            pd.testing.assert_frame_equal(getattr(result, attribute), getattr(updated, attribute))
+
+    def test_unchanged_component_cache_is_rechecked_before_reuse_if_log_is_live(self):
+        import gas_usage
+        times = ["2026-10-01 00:00:00", "2026-10-01 00:01:00"]
+        for tube in (1, 2):
+            self.write(log(times, tube=tube), name=f"TUBE{tube:02d}_261001_0.csv")
+        config = GasUsageConfig("2026-10", "2026-10")
+        cache = self.root / "usage.sqlite3"
+        calculate_monthly_usage(self.root, config, period_cache=cache)
+        self.write(log(times, n2=2 * CM3_PER_FT3), name="TUBE01_261001_0.csv")
+
+        def update_other_component(done, total, message):
+            if message.endswith("TUBE01_261001_0.csv"):
+                self.write(log(times, n2=3 * CM3_PER_FT3, tube=2), name="TUBE02_261001_0.csv")
+
+        with patch("gas_usage.read_flow_csv", wraps=gas_usage.read_flow_csv) as reader:
+            updated = calculate_monthly_usage(self.root, config, update_other_component, period_cache=cache)
+        self.assertEqual([c.args[0].name for c in reader.call_args_list],
+                         ["TUBE01_261001_0.csv", "TUBE02_261001_0.csv"])
+        self.assertAlmostEqual(updated.monthly.iloc[0]["N2 (ft³)"], 5)
 
     def test_proc_filename_validates_calendar_hours_and_padded_names(self):
         from gas_usage import proc_log_period
@@ -513,13 +613,119 @@ class GasUsageTests(unittest.TestCase):
         self.assertEqual(len(result.files),2)
         self.assertTrue(result.issues["Issue"].str.contains("8시간 기록 범위").any())
 
+    def test_one_second_hmi_skew_with_variable_cadence_is_single_pass_without_file_gap(self):
+        import gas_usage
+        early = self.write(log(["2026-10-01 07:59:00", "2026-10-01 07:59:30"]),
+                           name="TUBE01_261001_0.csv")
+        late = self.write(log(["2026-10-01 07:59:58", "2026-10-01 07:59:59", "2026-10-01 08:00:00",
+                               "2026-10-01 08:00:30", "2026-10-01 08:00:37"]),
+                          name="TUBE01_261001_8.csv")
+        config = GasUsageConfig("2026-10", "2026-10")
+        with patch("gas_usage.read_flow_csv", wraps=gas_usage.read_flow_csv) as reader, \
+             patch("gas_usage.DiskIntervalStore", side_effect=AssertionError("Unexpected disk sort")):
+            result = calculate_monthly_usage(self.root, config)
+        self.assertEqual([c.args[0] for c in reader.call_args_list], [early, late])
+        self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], (30 + 1 + 30 + 7) / 60)
+        self.assertEqual(result.files.iloc[1]["First"], "2026-10-01 07:59:59")
+        self.assertEqual(result.issues["Count"].tolist(), [1])
+
+    def test_next_month_midnight_skew_is_split_by_actual_time_not_counted_twice(self):
+        self.write(log(["2026-10-31 23:59:25", "2026-10-31 23:59:55"]),
+                   name="TUBE01_261031_16.csv")
+        self.write(log(["2026-10-31 23:59:59", "2026-11-01 00:00:29"]),
+                   name="TUBE01_261101_0.csv")
+        oct_only = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-10"))
+        nov_only = calculate_monthly_usage(self.root, GasUsageConfig("2026-11", "2026-11"))
+        both = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-11"))
+        self.assertAlmostEqual(oct_only.monthly.iloc[0]["N2 (ft³)"], 31 / 60)
+        self.assertAlmostEqual(nov_only.monthly.iloc[0]["N2 (ft³)"], 29 / 60)
+        expected = pd.concat([oct_only.monthly, nov_only.monthly], ignore_index=True)
+        pd.testing.assert_frame_equal(expected, both.monthly)
+
+    def test_prior_shift_midnight_repeats_remain_in_actual_month_and_cache(self):
+        import gas_usage
+        prior = self.write(log(["2026-10-31 23:59:30", "2026-11-01 00:00:00", "2026-11-01 00:00:00"]),
+                           name="TUBE01_261031_16.csv")
+        current = self.write(log(["2026-10-31 23:59:59", "2026-11-01 00:00:01"]),
+                             name="TUBE01_261101_0.csv")
+        (self.root / "TUBE01_261031_8.csv").write_bytes(b"must not read")
+        cache = self.root / "usage.sqlite3"
+        oct_only = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-10"))
+        config = GasUsageConfig("2026-11", "2026-11")
+        with patch("gas_usage.read_flow_csv", wraps=gas_usage.read_flow_csv) as reader:
+            nov_only = calculate_monthly_usage(self.root, config, period_cache=cache)
+        self.assertEqual([c.args[0] for c in reader.call_args_list], [prior, current])
+        both = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-11"))
+        pd.testing.assert_frame_equal(pd.concat([oct_only.monthly, nov_only.monthly], ignore_index=True),
+                                      both.monthly)
+        self.assertAlmostEqual(nov_only.monthly.iloc[0]["N2 (ft³)"], 1.5 / 60)
+        with patch("gas_usage.read_flow_csv", side_effect=AssertionError("Unexpected warm read")):
+            warmed = calculate_monthly_usage(self.root, config, period_cache=cache)
+        pd.testing.assert_frame_equal(nov_only.monthly, warmed.monthly)
+        self.assertEqual(warmed.settings.set_index("Setting").loc["Prior-month boundary files", "Value"], 1)
+
+    def test_canonical_adjacent_shift_jitter_keeps_both_samples_without_disk_sort(self):
+        import gas_usage
+        early = self.write(log(["2026-10-01 07:59:30", "2026-10-01 08:00:00"]),
+                           name="TUBE01_261001_0.csv")
+        late = self.write(log(["2026-10-01 07:59:59", "2026-10-01 08:00:29"], n2=2 * CM3_PER_FT3),
+                          name="TUBE01_261001_8.csv")
+        config = GasUsageConfig("2026-10", "2026-10")
+        with patch("gas_usage.read_flow_csv", wraps=gas_usage.read_flow_csv) as reader, \
+             patch("gas_usage.DiskIntervalStore", side_effect=AssertionError("Unexpected disk sort")):
+            result = calculate_monthly_usage(self.root, config)
+        self.assertEqual([c.args[0] for c in reader.call_args_list], [early, late])
+        self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], (30 + 30 * 2) / 60)
+        self.assertEqual(result.settings.set_index("Setting").loc["Direct streaming files", "Value"], 2)
+        self.assertTrue(result.issues.empty)
+
+    def test_equal_timestamps_in_separate_normal_shift_files_are_not_deduplicated(self):
+        self.write(log(["2026-10-01 07:59:29", "2026-10-01 07:59:59", "2026-10-01 07:59:59"]),
+                   name="TUBE01_261001_0.csv")
+        self.write(log(["2026-10-01 07:59:59", "2026-10-01 07:59:59", "2026-10-01 08:00:01"]),
+                   name="TUBE01_261001_8.csv")
+        config = GasUsageConfig("2026-10", "2026-10")
+        with patch("gas_usage.DiskIntervalStore", side_effect=AssertionError("Unexpected disk sort")):
+            result = calculate_monthly_usage(self.root, config)
+        self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], 33 / 60)
+        self.assertEqual(result.issues.loc[result.issues.Issue.str.contains("1초로 가정"), "Count"].sum(), 2)
+
+    def test_short_gaps_use_one_second_then_use_raw_elapsed_across_chunks(self):
+        elapsed = np.array([0, 0, 1, 3, 6, 15, 25, 55, 115])  # Gaps: 0, 1, 2, 3, 9, 10, 30, 60
+        times = pd.Timestamp("2026-10-01") + pd.to_timedelta(elapsed, unit="s")
+        self.write(log(times.astype(str)), name="TUBE01_261001_0.csv")
+        config = GasUsageConfig("2026-10", "2026-10")
+        for chunk_size in (1, 2, 3, 10_000):
+            with self.subTest(chunk_size=chunk_size), patch("gas_usage.CSV_CHUNK_ROWS", chunk_size):
+                result = calculate_monthly_usage(self.root, config)
+            self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], (3 + 3 + 9 + 10 + 30 + 60) / 60)
+            self.assertAlmostEqual(result.monthly.iloc[0]["N2 recorded (h)"], 115 / 3600)
+            self.assertAlmostEqual(result.channels.query("Gas == 'N2'")["Volume (ft³)"].sum(), 115 / 60)
+
+    def test_short_gap_at_month_boundary_prorates_one_second_at_interpolated_rates(self):
+        self.write(log(["2026-10-31 23:59:59", "2026-11-01 00:00:01"], n2=[0, 4 * CM3_PER_FT3]),
+                   name="TUBE01_261101_0.csv")
+        october = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-10"))
+        november = calculate_monthly_usage(self.root, GasUsageConfig("2026-11", "2026-11"))
+        both = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-11"))
+        self.assertTrue(np.allclose(both.monthly["N2 (ft³)"], [0.5/60, 1.5/60]))
+        self.assertTrue(np.allclose(both.monthly["N2 recorded (h)"], [0.5/3600, 0.5/3600]))
+        pd.testing.assert_frame_equal(pd.concat([october.monthly, november.monthly], ignore_index=True), both.monthly)
+
+    def test_max_gap_uses_raw_time_before_short_gap_weighting(self):
+        times = pd.Timestamp("2026-10-01") + pd.to_timedelta([0, 0, 1, 3, 12], unit="s")
+        self.write(log(times.astype(str)), name="TUBE01_261001_0.csv")
+        result = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-10", max_gap_seconds=2))
+        self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], 3 / 60)
+        self.assertEqual(result.issues.loc[result.issues.Issue.str.contains("기록 간격"), "Count"].sum(), 1)
+
     def test_other_month_changes_keep_selected_month_cache_and_new_selected_file_is_read_once(self):
         from gas_usage import read_flow_csv
         self.write(log(["2026-10-01 00:00:00","2026-10-01 00:01:00"]),name="TUBE01_261001_0.csv")
         config=GasUsageConfig("2026-10","2026-10")
         cache=self.root/"cache.sqlite3"
         calculate_monthly_usage(self.root,config,period_cache=cache)
-        outside=self.root/"TUBE01_261101_0.csv"
+        outside=self.root/"TUBE01_261101_8.csv"
         outside.write_bytes(b"unreadable outside period")
         with patch("gas_usage.read_flow_csv",side_effect=AssertionError("Unrelated month invalidated cache")), \
              patch("gas_usage.read_time_bounds",side_effect=AssertionError("Unexpected time probe")):

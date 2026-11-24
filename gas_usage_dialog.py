@@ -137,7 +137,8 @@ class GasUsageDialog(QDialog):
         form.addRow("ProcLog 폴더", path_row)
         self.filename_filter = QCheckBox("파일명으로 대상 월 선별 (TUBE##_YYMMDD_0/8/16.csv)")
         self.filename_filter.setChecked(self.settings.value("filename_period", True, type=bool))
-        self.filename_filter.setToolTip("기본값: 파일명의 날짜로 선별하고 선택 파일만 읽습니다.\n"
+        self.filename_filter.setToolTip("기본값: 선택 월과 앞뒤 월 경계 파일만 읽습니다.\n"
+                                       "파일 시작보다 최대 1초 빠른 기록을 허용하며 실제 시각으로 월을 나눕니다.\n"
                                        "이름 형식이 다른 과거 로그는 해제하면 시간 컬럼으로 선별합니다.")
         form.addRow(self.filename_filter)
         self.n2_edit = QLineEdit(self.settings.value("n2", ", ".join(DEFAULT_N2), type=str))
@@ -487,6 +488,10 @@ class GasUsageDialog(QDialog):
         values = result.settings.set_index("Setting")["Value"]
         skipped = int(values.get("Skipped outside period", 0))
         rejected = int(values.get("Rejected filename format", 0))
+        boundary = (int(values.get("Prior-month boundary files", 0))
+                    + int(values.get("Next-month boundary files", 0)))
+        if boundary:
+            prefix += f" · 월 경계 확인 {boundary:,}개"
         if rejected:
             prefix += f" · 파일명 형식 제외 {rejected:,}개"
         if str(values.get("Result cache", "")).startswith("Reused"):
