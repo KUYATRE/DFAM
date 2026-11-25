@@ -73,6 +73,35 @@ class GasUsageTests(unittest.TestCase):
         feb = self.result(GasUsageConfig("2026-02", "2026-02", filename_period=False))
         self.assertAlmostEqual(feb.tubes.iloc[0]["N2 (ft³)"], 0.75)
 
+    def test_single_day_clips_both_midnights_and_only_counts_repeats_inside(self):
+        self.write(log(["2028-02-28 23:59:30", "2028-02-29 00:00:30"],
+                       n2=[0, 2 * CM3_PER_FT3]))
+        self.write(log(["2028-02-29 23:59:30", "2028-02-29 23:59:30",
+                        "2028-03-01 00:00:30", "2028-03-01 00:00:30"],
+                       n2=[0, CM3_PER_FT3, 3 * CM3_PER_FT3, CM3_PER_FT3]), "TUBE01_end.csv")
+        config = GasUsageConfig("2028-02-29", "2028-02-29", filename_period=False)
+        result = self.result(config)
+        expected = 0.75 + 0.75 + 1 / 60
+        self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], expected)
+        self.assertAlmostEqual(result.tubes.iloc[0]["N2 recorded (h)"], 61 / 3600)
+        self.assertAlmostEqual(result.channels.query("Gas == 'N2'")["Volume (ft³)"].sum(), expected)
+        with self.assertRaisesRegex(ValueError, "start date"):
+            self.result(GasUsageConfig("2028-02-29", "2028-02-28"))
+
+    def test_filename_and_cache_follow_exact_dates_within_month(self):
+        for day, rate in ((14, 1), (15, 2)):
+            self.write(log([f"2026-01-{day} 08:00:00", f"2026-01-{day} 08:01:00"],
+                           n2=rate * CM3_PER_FT3), f"TUBE01_2601{day}_8.csv")
+        cache = self.root / "periods.sqlite3"
+        for day, expected, reused in ((14, 1, False), (15, 2, False), (14, 1, True)):
+            day_text = f"2026-01-{day}"
+            result = calculate_monthly_usage(self.root, GasUsageConfig(day_text, day_text), period_cache=cache)
+            settings = result.settings.set_index("Setting")["Value"]
+            self.assertEqual(settings["Date range"], f"{day_text} ~ {day_text}")
+            self.assertEqual(settings["Candidate files"], 1)
+            self.assertEqual(settings["Result cache"].startswith("Reused"), reused)
+            self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], expected)
+
     def test_leap_year_and_year_boundary(self):
         self.write(log(["2028-02-29 23:59:30", "2028-03-01 00:00:30"]))
         result = self.result(GasUsageConfig("2028-02", "2028-03", filename_period=False))
@@ -473,10 +502,10 @@ class GasUsageTests(unittest.TestCase):
         self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"],1440)
         settings = result.settings.set_index("Setting")["Value"]
         self.assertEqual(settings["Skipped outside period"], 3)
-        self.assertEqual(settings["Prior-month boundary files"], 1)
-        self.assertEqual(settings["Next-month boundary files"], 1)
+        self.assertEqual(settings["Prior boundary files"], 1)
+        self.assertEqual(settings["Next boundary files"], 1)
         self.assertTrue(result.issues.empty)
-        self.assertTrue(any("Selecting months by filename" in event[2] for event in events))
+        self.assertTrue(any("Selecting dates by filename" in event[2] for event in events))
 
     def test_filename_discovery_uses_directory_entries_and_stats_only_selected_logs(self):
         import gas_usage_cache
@@ -662,7 +691,7 @@ class GasUsageTests(unittest.TestCase):
         with patch("gas_usage.read_flow_csv", side_effect=AssertionError("Unexpected warm read")):
             warmed = calculate_monthly_usage(self.root, config, period_cache=cache)
         pd.testing.assert_frame_equal(nov_only.monthly, warmed.monthly)
-        self.assertEqual(warmed.settings.set_index("Setting").loc["Prior-month boundary files", "Value"], 1)
+        self.assertEqual(warmed.settings.set_index("Setting").loc["Prior boundary files", "Value"], 1)
 
     def test_canonical_adjacent_shift_jitter_keeps_both_samples_without_disk_sort(self):
         import gas_usage
@@ -864,6 +893,64 @@ class GasUsageUiTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_month_shortcuts_fill_active_dates_without_starting_calculation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            dialog = GasUsageDialog(folder, settings=QSettings(str(Path(folder) / "ui.ini"), QSettings.IniFormat))
+            try:
+                for today, previous in ((QDate(2028, 3, 31), QDate(2028, 2, 29)),
+                                        (QDate(2027, 1, 12), QDate(2026, 12, 31))):
+                    with self.subTest(today=today), patch("gas_usage_dialog.QDate", wraps=QDate) as clock:
+                        clock.currentDate.return_value = today
+                        dialog.tabs.setCurrentIndex(0)
+                        dialog.last_month.click()
+                        self.assertEqual(dialog.date_from.date(), QDate(previous.year(), previous.month(), 1))
+                        self.assertEqual(dialog.date_to.date(), previous)
+                        dialog.tabs.setCurrentIndex(1)
+                        dialog.this_month.click()
+                        self.assertEqual(dialog.trend_from.date(), QDate(today.year(), today.month(), 1))
+                        self.assertEqual(dialog.trend_to.date(), QDate(today.year(), today.month(), today.daysInMonth()))
+                        self.assertEqual(dialog.date_to.date(), previous)
+                        self.assertIsNone(dialog.worker)
+            finally:
+                dialog.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    def test_cards_details_and_export_share_partial_month_range(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for day in ("2026-01-29", "2026-01-31", "2026-02-01", "2026-02-03"):
+                name = QDate.fromString(day, "yyyy-MM-dd").toString("yyMMdd")
+                log([f"{day} 00:00:00", f"{day} 00:01:00"]).to_csv(root / f"TUBE01_{name}_0.csv", index=False)
+            dialog = GasUsageDialog(root, settings=QSettings(str(root / "ui.ini"), QSettings.IniFormat))
+            try:
+                dialog.date_from.setDate(QDate(2026, 1, 30))
+                dialog.date_to.setDate(QDate(2026, 2, 2))
+                dialog.calculate_button.click()
+                loop = QEventLoop()
+                dialog.worker.finished.connect(loop.quit)
+                QTimer.singleShot(10000, loop.quit)
+                loop.exec()
+                self.assertIsNone(dialog.worker)
+                self.assertIn("2.000000", dialog.monthly_totals["N2"].text())
+                self.assertEqual(dialog.tube_table.rowCount(), 2)
+                path = root / "range.xlsx"
+                with patch("gas_usage_dialog.QFileDialog.getSaveFileName", return_value=(str(path), "")), \
+                     patch("gas_usage_dialog.QMessageBox.information"):
+                    dialog.export_button.click()
+                settings = pd.read_excel(path, sheet_name="Settings").set_index("Setting")["Value"]
+                self.assertEqual(settings["Date range"], "2026-01-30 ~ 2026-02-02")
+                self.assertEqual(pd.read_excel(path)["N2 (ft³)"].tolist(), [1, 1])
+                dialog.date_to.setDate(QDate(2026, 2, 1))
+                self.assertFalse(dialog.export_button.isEnabled())
+                self.assertIn("—", dialog.monthly_totals["N2"].text())
+            finally:
+                if dialog.worker is not None:
+                    dialog.worker.requestInterruption()
+                    dialog.worker.wait()
+                    self.app.processEvents()
+                dialog.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
     def test_filename_filter_is_default_and_reaches_worker_and_saved_settings(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)
@@ -872,7 +959,7 @@ class GasUsageUiTests(unittest.TestCase):
             dialog=GasUsageDialog(root,settings=settings)
             try:
                 self.assertTrue(dialog.filename_filter.isChecked())
-                dialog.selected_month.setDate(QDate(2026,10,1))
+                dialog.set_calendar_month(QDate(2026,10,1))
                 dialog.start_calculation()
                 self.assertTrue(dialog.worker.config.filename_period)
                 loop=QEventLoop()
@@ -939,8 +1026,8 @@ class GasUsageUiTests(unittest.TestCase):
             settings = QSettings(str(root / "ui.ini"), QSettings.IniFormat)
             dialog = GasUsageDialog(root, settings=settings)
             dialog.filename_filter.setChecked(False)  # Legacy recipe-log fixtures.
-            dialog.month_from.setDate(QDate(2026, 1, 1))
-            dialog.month_to.setDate(QDate(2026, 2, 1))
+            dialog.trend_from.setDate(QDate(2026, 1, 1))
+            dialog.trend_to.setDate(QDate(2026, 2, 28))
             dialog.start_calculation(scope="trend")
             loop = QEventLoop()
             dialog.worker.finished.connect(loop.quit)
@@ -992,13 +1079,13 @@ class GasUsageUiTests(unittest.TestCase):
             try:
                 self.assertEqual(dialog.tabs.count(), 4)
                 self.assertFalse(hasattr(dialog, "equipment_filter"))
-                dialog.selected_month.setDate(QDate(2026, 2, 1))
-                dialog.month_from.setDate(QDate(2026, 1, 1))
-                dialog.month_to.setDate(QDate(2026, 2, 1))
+                dialog.set_calendar_month(QDate(2026, 2, 1))
+                dialog.trend_from.setDate(QDate(2026, 1, 1))
+                dialog.trend_to.setDate(QDate(2026, 2, 28))
                 dialog.calculate_button.click()
-                self.assertEqual(dialog.worker.config.start_month, "2026-02")
-                self.assertEqual(dialog.worker.config.end_month, "2026-02")
-                self.assertFalse(dialog.selected_month.isEnabled())
+                self.assertEqual(dialog.worker.config.start_month, "2026-02-01")
+                self.assertEqual(dialog.worker.config.end_month, "2026-02-28")
+                self.assertFalse(dialog.date_from.isEnabled())
                 wait_for_worker(dialog)
                 self.assertEqual(dialog.month_result.tubes["Month"].tolist(), ["2026-02"])
                 self.assertIsNone(dialog.trend_result)
@@ -1006,25 +1093,26 @@ class GasUsageUiTests(unittest.TestCase):
                 self.assertEqual(dialog.chart.series(), [])
                 dialog.tabs.setCurrentIndex(1)
                 self.assertFalse(dialog.export_button.isEnabled())
-                dialog.trend_calculate_button.click()
-                self.assertEqual(dialog.worker.config.start_month, "2026-01")
-                self.assertEqual(dialog.worker.config.end_month, "2026-02")
+                dialog.calculate_button.click()
+                self.assertEqual(dialog.worker.config.start_month, "2026-01-01")
+                self.assertEqual(dialog.worker.config.end_month, "2026-02-28")
                 wait_for_worker(dialog)
                 self.assertIn("3.0000", dialog.summary.text())
                 trend = dialog.trend_result
-                dialog.selected_month.setDate(QDate(2026, 3, 1))
+                dialog.tabs.setCurrentIndex(0)
+                dialog.set_calendar_month(QDate(2026, 3, 1))
                 dialog.calculate_button.click()
                 wait_for_worker(dialog)
                 self.assertIs(dialog.trend_result, trend)
                 self.assertIn("3.0000", dialog.summary.text())
                 self.assertIn("—", dialog.monthly_totals["N2"].text())
-                dialog.selected_month.setDate(QDate(2026, 2, 1))
+                dialog.set_calendar_month(QDate(2026, 2, 1))
                 self.assertIn("2.000000", dialog.monthly_totals["N2"].text())
-                dialog.month_to.setDate(QDate(2026, 3, 1))
+                dialog.trend_to.setDate(QDate(2026, 3, 1))
                 self.assertIsNone(dialog.trend_result)
                 self.assertEqual(dialog.chart.series(), [])
                 # The monthly result for March survives changes to the trend dates.
-                dialog.selected_month.setDate(QDate(2026, 3, 1))
+                dialog.set_calendar_month(QDate(2026, 3, 1))
                 self.assertIsNotNone(dialog.result)
                 self.assertEqual(dialog.result.tubes["Month"].tolist(), ["2026-03"])
             finally:
@@ -1082,10 +1170,11 @@ class GasUsageUiTests(unittest.TestCase):
                 dialog._calculation_scope = "trend"
                 dialog.tabs.setCurrentIndex(1)
                 dialog.show_result(result)
-                dialog.selected_month.setDate(QDate(2026, 2, 1))
+                dialog.tabs.setCurrentIndex(0)
+                dialog.set_calendar_month(QDate(2026, 2, 1))
                 self.assertIn("12.000000", dialog.monthly_totals["N2"].text())
                 self.assertIn("1.000000", dialog.tube_cards["TUBE01"].values[DEFAULT_N2[0]].text())
-                dialog.selected_month.setDate(QDate(2026, 1, 1))
+                dialog.set_calendar_month(QDate(2026, 1, 1))
                 self.assertIn("3.000000", dialog.monthly_totals["N2"].text())
                 self.assertIn("0.250000", dialog.tube_cards["TUBE01"].values[DEFAULT_N2[0]].text())
                 dialog.tube_filter.setCurrentIndex(1)

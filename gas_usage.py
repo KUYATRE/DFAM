@@ -3,6 +3,7 @@
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date
+from functools import cached_property
 import os
 from pathlib import Path
 import re
@@ -38,6 +39,7 @@ class CalculationCancelled(Exception):
 
 @dataclass(frozen=True)
 class GasUsageConfig:
+    """Accept inclusive ISO dates, or YYYY-MM for whole-month callers."""
     start_month: str
     end_month: str
     n2_columns: tuple[str, ...] = DEFAULT_N2
@@ -46,11 +48,34 @@ class GasUsageConfig:
     max_gap_seconds: float | None = None
     filename_period: bool = True
 
+    @cached_property
+    def date_bounds(self):
+        dates = []
+        for value, is_end in ((self.start_month, False), (self.end_month, True)):
+            if re.fullmatch(r"\d{4}-\d{2}", value):
+                month = pd.Period(value, "M")
+                day = month.end_time.normalize() if is_end else month.start_time
+            else:
+                day = pd.Timestamp(date.fromisoformat(value))
+            dates.append(day)
+        return dates[0], dates[1] + pd.Timedelta(days=1)
+
+    @cached_property
+    def months(self):
+        start, stop = self.date_bounds
+        return pd.period_range(start, stop - pd.Timedelta(days=1), freq="M")
+
+    @cached_property
+    def month_windows(self):
+        start, stop = self.date_bounds
+        return [(str(m), max(start.value, m.start_time.value),
+                 min(stop.value, (m + 1).start_time.value)) for m in self.months]
+
     def validate(self):
-        start, end = pd.Period(self.start_month, "M"), pd.Period(self.end_month, "M")
-        if start > end:
-            raise ValueError("The start month must be on or before the end month.")
-        if end.ordinal - start.ordinal > 119:
+        start, stop = self.date_bounds
+        if start >= stop:
+            raise ValueError("The start date must be on or before the end date.")
+        if len(self.months) > 120:
             raise ValueError("Select up to 120 months per calculation.")
         if self.max_gap_seconds is not None and (not np.isfinite(self.max_gap_seconds) or self.max_gap_seconds <= 0):
             raise ValueError("The maximum recording gap must be greater than zero seconds.")
@@ -245,9 +270,8 @@ def flow_intervals(df, path, tube, config, issues, *, carried=False, time_ns=Non
     if config.max_gap_seconds is not None:
         issue(f"Recording gap exceeds {config.max_gap_seconds:g} seconds (interval excluded)", (pair & (seconds > config.max_gap_seconds)).sum())
         valid &= seconds <= config.max_gap_seconds
-    bounds = (pd.Period(config.start_month, "M").start_time.value,
-              (pd.Period(config.end_month, "M") + 1).start_time.value)
-    valid &= (ns[:-1] < bounds[1]) & (ns[1:] > bounds[0])
+    start, stop = config.date_bounds
+    valid &= (ns[:-1] < stop.value) & (ns[1:] > start.value)
     frames = []
     for gas, columns in (("N2", config.n2_columns), ("O2", config.o2_columns)):
         missing = [c for c in columns if c not in df]
@@ -270,7 +294,7 @@ def flow_intervals(df, path, tube, config, issues, *, carried=False, time_ns=Non
             frames.append(intervals)
         # These are extra assumed seconds, not synthetic wall-clock spans:
         # overlap removal must not erase them against the next normal interval.
-        mask = repeated & good[1:] & (ns[1:] >= bounds[0]) & (ns[1:] < bounds[1])
+        mask = repeated & good[1:] & (ns[1:] >= start.value) & (ns[1:] < stop.value)
         if mask.any():
             samples = pd.DataFrame({"Tube": tube, "Gas": gas,
                 "start": ns[1:][mask], "end": ns[1:][mask],
@@ -386,26 +410,25 @@ class SourceChanged(Exception):
 class IntervalTotals:
     def __init__(self, config):
         self.config = config
-        self.months = pd.period_range(config.start_month, config.end_month, freq="M")
         self.values = {}
 
     def add_repeated(self, tube, gas, timestamps, rates, channels):
         """One second at each repeated row's own rate, assigned to its timestamp month."""
-        for month in self.months:
-            keep = (timestamps >= month.start_time.value) & (timestamps < (month + 1).start_time.value)
+        for month, lo, hi in self.config.month_windows:
+            keep = (timestamps >= lo) & (timestamps < hi)
             if keep.any():
                 values = np.r_[rates[keep].sum() / 60 / CM3_PER_FT3,
                                keep.sum() / 3600,
                                channels[keep].sum(axis=0) / 60 / CM3_PER_FT3]
-                self.values.setdefault((tube, gas, str(month)), np.zeros(len(values)))[:] += values
+                self.values.setdefault((tube, gas, month), np.zeros(len(values)))[:] += values
 
     def add(self, tube, gas, start, end, q0, q1, channels, unique_start=None):
         n = channels.shape[1] // 2
         if unique_start is None:
             unique_start = start
-        for month in self.months:
-            lo = np.maximum(unique_start, month.start_time.value)
-            hi = np.minimum(end, (month + 1).start_time.value)
+        for month, month_start, month_stop in self.config.month_windows:
+            lo = np.maximum(unique_start, month_start)
+            hi = np.minimum(end, month_stop)
             keep = hi > lo
             if not keep.any():
                 continue
@@ -426,7 +449,7 @@ class IntervalTotals:
             right_c = c0 + (c1 - c0) * right_fraction[:, None]
             channel_volume = np.sum((left_c + right_c) * .5 * seconds[:, None] / 60, axis=0) / CM3_PER_FT3
             values = np.r_[volume, seconds.sum() / 3600, channel_volume]
-            self.values.setdefault((tube, gas, str(month)), np.zeros(n + 2))[:] += values
+            self.values.setdefault((tube, gas, month), np.zeros(n + 2))[:] += values
 
     def merge(self, other):
         for key, values in other.values.items():
@@ -547,7 +570,7 @@ def integrate_intervals(store, config, issues, paths, cancelled=lambda: False, c
 
 
 def summarize_usage(integrated, identities, config):
-    months = [str(m) for m in pd.period_range(config.start_month, config.end_month, freq="M")]
+    months = config.months.astype(str)
     index = pd.MultiIndex.from_tuples(
         [(month, tube) for month in months for tube in sorted(identities)],
         names=["Month", "Tube"])
@@ -606,15 +629,15 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
         raise CalculationCancelled()
     issues, records, identities = IssueCounts(), [], set()
     candidates, candidate_bounds, rejected_names = [], [], []
-    period_start = pd.Period(config.start_month, "M").start_time.value
-    period_end = (pd.Period(config.end_month, "M") + 1).start_time.value
+    start, stop = config.date_bounds
+    period_start, period_end = start.value, stop.value
     prior_boundary_files = next_boundary_files = 0
     if config.filename_period:
         for i, path in enumerate(paths):
             if cancelled():
                 raise CalculationCancelled()
             if i % 100 == 0:
-                progress(i, len(paths), "Selecting months by filename without reading CSV contents")
+                progress(i, len(paths), "Selecting dates by filename without reading CSV contents")
             parsed = proc_log_period(path)
             if parsed is None:
                 rejected_names.append(str(path))
@@ -659,8 +682,8 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
             for setting, value in (("Scanned files", len(paths)),
                                    ("Skipped outside period", len(paths) - len(candidates) - len(rejected_names)),
                                    ("Rejected filename format", len(rejected_names)),
-                                   ("Prior-month boundary files", prior_boundary_files),
-                                   ("Next-month boundary files", next_boundary_files)):
+                                   ("Prior boundary files", prior_boundary_files),
+                                   ("Next boundary files", next_boundary_files)):
                 result.settings.loc[result.settings["Setting"] == setting, "Value"] = value
         progress(len(paths), len(paths), "Reusing results for unchanged logs")
         return result
@@ -797,12 +820,13 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
         cache.close()
     tubes, monthly = summarize_usage(integrated, identities, config)
     settings = pd.DataFrame([
-        ["Root", str(root.resolve())], ["Months", f"{config.start_month} ~ {config.end_month}"],
-        ["File selection", "Filename TUBE##_YYMMDD_0/8/16; requested months plus adjacent midnight boundary shifts; clip by actual time"
+        ["Root", str(root.resolve())], ["Months", f"{config.months[0]} ~ {config.months[-1]}"],
+        ["Date range", f"{start.date()} ~ {(stop - pd.Timedelta(days=1)).date()}"],
+        ["File selection", "Filename TUBE##_YYMMDD_0/8/16; selected dates plus adjacent midnight boundary shifts; clip by actual time"
          if config.filename_period else "Legacy mode: actual timestamp bounds intersect query"],
         ["Scanned files", len(paths)], ["Candidate files", len(candidates)],
-        ["Prior-month boundary files", prior_boundary_files],
-        ["Next-month boundary files", next_boundary_files],
+        ["Prior boundary files", prior_boundary_files],
+        ["Next boundary files", next_boundary_files],
         ["Skipped outside period", len(paths) - len(candidates) - len(rejected_names)],
         ["Rejected filename format", len(rejected_names)],
         ["Processing", f"Streaming {CSV_CHUNK_ROWS} rows per batch; isolated ordered files integrate directly; disk ordering only for overlaps"],
@@ -834,9 +858,14 @@ def calculate_monthly_usage(root, config, progress=lambda done, total, name: Non
 def select_usage_month(result, month):
     """Slice volumes for export; keep original file diagnostics and their scan scope."""
     settings = result.settings.copy()
-    scope = settings.loc[settings["Setting"] == "Months", "Value"].iloc[0]
     settings.loc[settings["Setting"] == "Months", "Value"] = f"{month} ~ {month}"
-    settings.loc[len(settings)] = ["Review scan scope", scope]
+    dates = settings["Setting"] == "Date range"
+    start, end = settings.loc[dates, "Value"].iloc[0].split(" ~ ")
+    period = pd.Period(month, "M")
+    first = max(start, str(period.start_time.date()))
+    last = min(end, str(period.end_time.date()))
+    settings.loc[dates, "Value"] = f"{first} ~ {last}"
+    settings.loc[len(settings)] = ["Review scan scope", f"{start} ~ {end}"]
     return GasUsageResult(
         result.tubes[result.tubes["Month"] == month].copy(),
         result.monthly[result.monthly["Month"] == month].copy(),

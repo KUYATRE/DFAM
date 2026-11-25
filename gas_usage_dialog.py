@@ -1,4 +1,4 @@
-"""Monthly gas dashboard; CSV scanning runs outside the GUI thread."""
+"""Gas usage dashboard for selected dates, with CSV scanning outside the GUI thread."""
 
 from pathlib import Path
 from background_work import background_resources
@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMessageBox, QProgressBar, QPushButton,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
-    QFrame, QGridLayout, QScrollArea,
+    QFrame, QGridLayout, QScrollArea, QSizePolicy, QStackedWidget,
 )
 
 from ui_theme import (apply_chrome_input_styles, apply_shadow, ChromeComboBox as QComboBox,
@@ -95,13 +95,20 @@ class GasUsageDialog(QDialog):
         title.setStyleSheet("font-size:23px; font-weight:700; color:#243f54;")
         header.addWidget(title)
         header.addStretch()
-        header.addWidget(QLabel("Month"))
         today = QDate.currentDate()
-        self.selected_month = QDateEdit(QDate(today.year(), today.month(), 1))
-        self.selected_month.setDisplayFormat("yyyy-MM")
-        self.selected_month.setCalendarPopup(True)
-        self.selected_month.setMinimumWidth(135)
-        header.addWidget(self.selected_month)
+        first = today.addDays(1 - today.day())
+        last = first.addMonths(1).addDays(-1)
+        self.date_ranges = QStackedWidget()
+        self.date_ranges.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        self.date_from, self.date_to = self._add_date_range(first, last)
+        self.trend_from, self.trend_to = self._add_date_range(QDate(today.year(), 1, 1), last)
+        header.addWidget(self.date_ranges)
+        self.this_month = QPushButton("This Month")
+        self.last_month = QPushButton("Last Month")
+        self.this_month.clicked.connect(lambda: self.set_calendar_month(QDate.currentDate()))
+        self.last_month.clicked.connect(lambda: self.set_calendar_month(QDate.currentDate().addMonths(-1)))
+        for button in (self.this_month, self.last_month):
+            header.addWidget(button)
         layout.addWidget(banner)
 
         self.controls = QWidget()
@@ -113,11 +120,11 @@ class GasUsageDialog(QDialog):
         self.settings_toggle = QPushButton("Path and Calculation Settings")
         self.settings_toggle.setCheckable(True)
         toolbar.addWidget(self.settings_toggle)
-        self.calculate_button = PrimaryPushButton(FIF.PLAY, "Calculate Month")
+        self.calculate_button = PrimaryPushButton(FIF.PLAY, "Calculate Range")
         self.calculate_button.setProperty("primary", True)
         self.calculate_button.clicked.connect(self.start_calculation)
         toolbar.addWidget(self.calculate_button)
-        self.export_button = QPushButton("Export to Excel")
+        self.export_button = QPushButton("Export Range to Excel")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export)
         toolbar.addWidget(self.export_button)
@@ -135,10 +142,10 @@ class GasUsageDialog(QDialog):
         browse.clicked.connect(self.browse)
         path_row.addWidget(browse)
         form.addRow("ProcLog folder", path_row)
-        self.filename_filter = QCheckBox("Select months by filename (TUBE##_YYMMDD_0/8/16.csv)")
+        self.filename_filter = QCheckBox("Select dates by filename (TUBE##_YYMMDD_0/8/16.csv)")
         self.filename_filter.setChecked(self.settings.value("filename_period", True, type=bool))
-        self.filename_filter.setToolTip("By default, only files for the selected months and adjacent boundary shifts are read.\n"
-                                       "Records up to one second before the named start are accepted. Actual timestamps determine the month.\n"
+        self.filename_filter.setToolTip("Read files for the selected dates and adjacent boundary shifts.\n"
+                                       "Records up to one second before the named start are accepted. Actual timestamps determine usage.\n"
                                        "Clear this option to use the time column for older logs with other filename formats.")
         form.addRow(self.filename_filter)
         self.n2_edit = QLineEdit(self.settings.value("n2", ", ".join(DEFAULT_N2), type=str))
@@ -184,7 +191,7 @@ class GasUsageDialog(QDialog):
         progress_row.addWidget(self.cancel_button)
         layout.addWidget(self.progress_widget)
         self.progress_widget.hide()
-        self.status = QLabel("Choose a month and click Calculate Month. For multiple months, use the Usage Trends tab.")
+        self.status = QLabel("Choose a start and end date, then click Calculate Range.")
         self.status.setWordWrap(True)
         self.status.setStyleSheet("color:#526675; font-size:11px;")
         layout.addWidget(self.status)
@@ -208,16 +215,37 @@ class GasUsageDialog(QDialog):
 
         for edit in (self.root_edit, self.n2_edit, self.o2_edit, self.time_edit):
             edit.textChanged.connect(self.invalidate)
-        self.month_from.dateChanged.connect(self.invalidate_trend)
-        self.month_to.dateChanged.connect(self.invalidate_trend)
+        self.trend_from.dateChanged.connect(self.invalidate_trend)
+        self.trend_to.dateChanged.connect(self.invalidate_trend)
         self.gap.valueChanged.connect(self.invalidate)
         self.filename_filter.toggled.connect(self.invalidate)
         self.tube_filter.currentIndexChanged.connect(self.refresh_views)
-        self.selected_month.dateChanged.connect(self.month_changed)
+        self.date_from.dateChanged.connect(self.month_changed)
+        self.date_to.dateChanged.connect(self.month_changed)
         self.tabs.currentChanged.connect(self.tab_changed)
         apply_chrome_input_styles(self)
         self.refresh_monthly()
         self.refresh_views()
+
+    def _add_date_range(self, start, end):
+        page = QWidget()
+        row = QHBoxLayout(page)
+        row.setContentsMargins(0, 0, 0, 0)
+        start_edit, end_edit = QDateEdit(start), QDateEdit(end)
+        for label, edit in (("From", start_edit), ("To", end_edit)):
+            edit.setDisplayFormat("yyyy-MM-dd")
+            edit.setMinimumWidth(max(120, edit.sizeHint().width()))
+            row.addWidget(QLabel(label))
+            row.addWidget(edit)
+        self.date_ranges.addWidget(page)
+        return start_edit, end_edit
+
+    def set_calendar_month(self, date):
+        first = date.addDays(1 - date.day())
+        start, end = ((self.trend_from, self.trend_to) if self._display_scope == "trend"
+                      else (self.date_from, self.date_to))
+        start.setDate(first)
+        end.setDate(first.addMonths(1).addDays(-1))
 
     def _build_monthly_page(self):
         page = QWidget()
@@ -257,7 +285,7 @@ class GasUsageDialog(QDialog):
             totals.addWidget(value, 1, Qt.AlignHCenter)
             self.monthly_totals[gas] = value
         layout.addWidget(footer)
-        self.tabs.addTab(page, "Monthly Tube Usage")
+        self.tabs.addTab(page, "Tube Usage")
 
     def _build_trend_page(self):
         page = QWidget()
@@ -265,22 +293,6 @@ class GasUsageDialog(QDialog):
         self.trend_controls = QWidget()
         filters = QHBoxLayout(self.trend_controls)
         filters.setContentsMargins(0, 8, 0, 8)
-        filters.addWidget(QLabel("Date range"))
-        today = QDate.currentDate()
-        self.month_from, self.month_to = QDateEdit(), QDateEdit()
-        for edit, date in ((self.month_from, QDate(today.year(), 1, 1)),
-                           (self.month_to, QDate(today.year(), today.month(), 1))):
-            edit.setDisplayFormat("yyyy-MM")
-            edit.setCalendarPopup(True)
-            edit.setDate(date)
-            edit.setMinimumWidth(135)
-        filters.addWidget(self.month_from)
-        filters.addWidget(QLabel("~"))
-        filters.addWidget(self.month_to)
-        self.trend_calculate_button = QPushButton("Calculate Range")
-        self.trend_calculate_button.setProperty("primary", True)
-        self.trend_calculate_button.clicked.connect(lambda: self.start_calculation(scope="trend"))
-        filters.addWidget(self.trend_calculate_button)
         filters.addStretch()
         filters.addWidget(QLabel("Tube"))
         self.tube_filter = QComboBox()
@@ -302,14 +314,14 @@ class GasUsageDialog(QDialog):
         self.chart_view.setMinimumHeight(250)
         self.chart_view.setStyleSheet("background:transparent; border:0;")
         layout.addWidget(self.chart_view, 1)
-        note = QLabel("Select a date range and click Calculate Range. This calculation is separate from the monthly cards. An asterisk marks missing gas records.")
+        note = QLabel("The chart groups the selected dates by month. An asterisk marks missing gas records.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#657582; font-size:11px;")
         layout.addWidget(note)
         self.tabs.addTab(page, "Usage Trends")
 
     def refresh_monthly(self, *_):
-        month = self.selected_month.date().toString("yyyy-MM")
+        start, end = self.overview_dates()
         configured = [s.strip() for text in (self.n2_edit.text(), self.o2_edit.text())
                       for s in text.split(",") if s.strip()]
         columns = list(dict.fromkeys(configured))
@@ -321,8 +333,6 @@ class GasUsageDialog(QDialog):
             records = result.tubes
             channels = result.channels
             tubes = sorted(set(tubes) | set(records["Tube"]))
-            records = records[records["Month"] == month]
-            channels = channels[channels["Month"] == month]
         signature = (tuple(tubes), tuple(columns))
         if self._card_signature != signature:
             while self.cards_layout.count():
@@ -349,8 +359,8 @@ class GasUsageDialog(QDialog):
         for gas, label in self.monthly_totals.items():
             total = records[f"{gas} (ft³)"].sum(min_count=1) if not records.empty else float("nan")
             label.setText(volume_text(total))
-        hint = "Recorded N2 and O2 usage for the selected month" if result is not None else "Click Calculate Month to see usage"
-        self.month_caption.setText(f"{month}  |  All tubes  |  {hint}")
+        hint = "Recorded N2 and O2 usage" if result is not None else "Click Calculate Range to see usage"
+        self.month_caption.setText(f"{start} ~ {end}  |  All tubes  |  {hint}")
 
     def restore_defaults(self):
         self.filename_filter.setChecked(True)
@@ -364,42 +374,56 @@ class GasUsageDialog(QDialog):
         if path:
             self.root_edit.setText(path)
 
+    def overview_dates(self):
+        return self.date_from.date().toString("yyyy-MM-dd"), self.date_to.date().toString("yyyy-MM-dd")
+
     def monthly_source(self):
-        month = self.selected_month.date().toString("yyyy-MM")
+        start, end = self.overview_dates()
         for result in (self.month_result, self.trend_result):
             if result is not None:
-                start, end = result.settings.set_index("Setting").loc["Months", "Value"].split(" ~ ")
-                if start <= month <= end:
+                first, last = result.settings.set_index("Setting").loc["Date range", "Value"].split(" ~ ")
+                if (start, end) == (first, last):
                     return result
+                # A monthly subtotal is reusable only when both of its edges match.
+                month = self.date_from.date()
+                first_of_month = month.addDays(1 - month.day())
+                last_of_month = first_of_month.addMonths(1).addDays(-1)
+                if (start <= end and start == max(first, first_of_month.toString("yyyy-MM-dd"))
+                        and end == min(last, last_of_month.toString("yyyy-MM-dd"))):
+                    return select_usage_month(result, start[:7])
         return None
 
     def month_changed(self, *_):
+        self.status.setText("Choose Calculate Range to update usage for the selected dates.")
         self.refresh_monthly()
         self.refresh_views()
 
     def tab_changed(self, index):
         if index in (0, 1):
             self._display_scope = "month" if index == 0 else "trend"
+            self.date_ranges.setCurrentIndex(index)
         self.refresh_views()
 
     def invalidate(self, *_):
         self.month_result = self.trend_result = None
-        self.status.setText("Settings changed. Click Calculate Month or Calculate Range to update the results.")
+        self.status.setText("Settings changed. Click Calculate Range to update the results.")
         self.refresh_monthly()
         self.refresh_views()
 
     def invalidate_trend(self, *_):
         self.trend_result = None
+        self.status.setText("Choose Calculate Range to update the trend for the selected dates.")
         self.refresh_monthly()
         self.refresh_views()
 
-    def start_calculation(self, checked=False, *, scope="month"):
+    def start_calculation(self, checked=False, *, scope=None):
         if self.worker is not None:
             return
-        start, end = ((self.month_from.date(), self.month_to.date()) if scope == "trend"
-                      else (self.selected_month.date(), self.selected_month.date()))
+        scope = scope or self._display_scope
+        start, end = ((self.trend_from.date(), self.trend_to.date()) if scope == "trend"
+                      else (self.date_from.date(), self.date_to.date()))
         config = GasUsageConfig(
-            start.toString("yyyy-MM"), end.toString("yyyy-MM"),
+            start.toString("yyyy-MM-dd"), end.toString("yyyy-MM-dd"),
             tuple(s.strip() for s in self.n2_edit.text().split(",") if s.strip()),
             tuple(s.strip() for s in self.o2_edit.text().split(",") if s.strip()),
             self.time_edit.text().strip(), self.gap.value() or None,
@@ -409,7 +433,7 @@ class GasUsageDialog(QDialog):
             if not Path(self.root_edit.text().strip()).is_dir() or not self.root_edit.text().strip():
                 raise ValueError("The process log folder does not exist.")
         except ValueError as exc:
-            QMessageBox.warning(self, "Monthly Gas Usage", str(exc))
+            QMessageBox.warning(self, "Gas Usage", str(exc))
             return
         self._calculation_scope = scope
         if scope == "month":
@@ -420,7 +444,9 @@ class GasUsageDialog(QDialog):
         self.refresh_monthly()
         self.refresh_views()
         self.controls.setEnabled(False)
-        self.selected_month.setEnabled(False)
+        self.date_ranges.setEnabled(False)
+        self.this_month.setEnabled(False)
+        self.last_month.setEnabled(False)
         self.trend_controls.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.progress_widget.show()
@@ -456,7 +482,9 @@ class GasUsageDialog(QDialog):
         worker, self.worker = self.worker, None
         worker.deleteLater()
         self.controls.setEnabled(True)
-        self.selected_month.setEnabled(True)
+        self.date_ranges.setEnabled(True)
+        self.this_month.setEnabled(True)
+        self.last_month.setEnabled(True)
         self.trend_controls.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.progress.setRange(0, 100)
@@ -488,15 +516,15 @@ class GasUsageDialog(QDialog):
         values = result.settings.set_index("Setting")["Value"]
         skipped = int(values.get("Skipped outside period", 0))
         rejected = int(values.get("Rejected filename format", 0))
-        boundary = (int(values.get("Prior-month boundary files", 0))
-                    + int(values.get("Next-month boundary files", 0)))
+        boundary = (int(values.get("Prior boundary files", 0))
+                    + int(values.get("Next boundary files", 0)))
         if boundary:
             prefix += f" · Boundary files checked: {boundary:,}"
         if rejected:
             prefix += f" · Filenames excluded: {rejected:,}"
         if str(values.get("Result cache", "")).startswith("Reused"):
             prefix += " (using cached results for unchanged logs)"
-        period = values["Months"].split(" ~ ")
+        period = values["Date range"].split(" ~ ")
         label = period[0] if period[0] == period[1] else " ~ ".join(period)
         self.status.setText(f"{label} · {prefix} · Files selected: {len(result.files):,} · Outside range: {skipped:,} · Issues: {len(result.issues):,}. "
                             "See Review Issues for excluded intervals and missing files.")
@@ -519,18 +547,13 @@ class GasUsageDialog(QDialog):
 
     def refresh_views(self, *_):
         self.result = self.monthly_source() if self._display_scope == "month" else self.trend_result
-        scope = "Month" if self._display_scope == "month" else "Range"
-        self.export_button.setText(f"Export {scope} to Excel")
         self.export_button.setEnabled(self.result is not None and self.worker is None)
         if self.result is None:
             self.tube_table.setRowCount(0)
             self.issues_table.setRowCount(0)
             self.tabs.setTabText(3, "Review Issues")
         else:
-            tubes = self.result.tubes
-            if self._display_scope == "month":
-                tubes = tubes[tubes["Month"] == self.selected_month.date().toString("yyyy-MM")]
-            self.fill_table(self.tube_table, tubes)
+            self.fill_table(self.tube_table, self.result.tubes)
             self.fill_table(self.issues_table, self.result.issues)
             self.tabs.setTabText(3, f"Review Issues ({len(self.result.issues):,})")
         self.chart.removeAllSeries()
@@ -579,15 +602,15 @@ class GasUsageDialog(QDialog):
     def export(self):
         if self.result is None:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export Monthly Gas Usage",
-            str(Path(self.root_edit.text()) / "monthly_gas_usage.xlsx"), "Excel (*.xlsx)")
+        period = self.result.settings.set_index("Setting").loc["Date range", "Value"].replace(" ~ ", "_")
+        path, _ = QFileDialog.getSaveFileName(self, "Export Gas Usage",
+            str(Path(self.root_edit.text()) / f"gas_usage_{period}.xlsx"), "Excel (*.xlsx)")
         if not path:
             return
         if not path.lower().endswith(".xlsx"):
             path += ".xlsx"
         try:
-            export_gas_usage(select_usage_month(self.result, self.selected_month.date().toString("yyyy-MM"))
-                             if self._display_scope == "month" else self.result, path)
+            export_gas_usage(self.result, path)
         except Exception as exc:
             QMessageBox.warning(self, "Export Failed", str(exc))
             return

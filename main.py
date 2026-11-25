@@ -142,7 +142,7 @@ class AppSettingsDialog(QDialog):
         self.history_edit = QLineEdit(history_dir)
         self.proc_log_edit = QLineEdit(proc_log_dir)
         self.proc_log_edit.setPlaceholderText(DEFAULT_PROC_LOG_DIR)
-        self.proc_log_edit.setToolTip("Folder for monthly gas usage logs. The app checks this path when you run a calculation.")
+        self.proc_log_edit.setToolTip("Folder for gas usage logs. The app checks this path when you run a calculation.")
 
         self.root_btn = QPushButton("Browse...")
         self.alarm_btn = QPushButton("Browse...")
@@ -2446,8 +2446,8 @@ class CsvPlotPanel(QWidget):
         apply_shadow(self.btn_history, blur=18, y_offset=3)
         title_row.addWidget(self.btn_history, 0)
 
-        self.btn_gas_usage = QPushButton("Monthly Gas Usage")
-        self.btn_gas_usage.setToolTip("Monthly N2 and O2 usage by tube and across all tubes (ft³)")
+        self.btn_gas_usage = QPushButton("Gas Usage")
+        self.btn_gas_usage.setToolTip("N2 and O2 usage for selected dates by tube and across all tubes (ft³)")
         self.btn_gas_usage.clicked.connect(self.show_gas_usage)
         self.btn_gas_usage.setStyleSheet(toolbar_btn_css)
         title_row.addWidget(self.btn_gas_usage, 0)

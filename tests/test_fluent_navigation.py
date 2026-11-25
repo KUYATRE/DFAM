@@ -72,7 +72,8 @@ class FluentNavigationTests(unittest.TestCase):
         QTest.mouseClick(nav.widget("gasUsageDialog").itemWidget, Qt.LeftButton)
         gas = self.window.gas_page
         self.assertIs(self.window.stackedWidget.currentWidget(), gas)
-        gas.selected_month.picker.setDate(QDate(2026, 10, 1))
+        gas.date_from.picker.setDate(QDate(2026, 10, 1))
+        gas.date_to.setDate(QDate(2026, 10, 1))
         gas.calculate_button.click()
         self.wait_until(lambda: gas.worker is None)
         self.assertAlmostEqual(gas.month_result.monthly.iloc[0]["N2 (ft³)"], 1)
@@ -106,10 +107,11 @@ class FluentNavigationTests(unittest.TestCase):
     def test_segmented_pages_update_export_scope_and_calendar_does_not_repeat_unchanged_date(self):
         gas = self.window.gas_page
         calls = []
-        gas.selected_month.dateChanged.connect(calls.append)
-        gas.selected_month.setDate(QDate(2026, 10, 1))
-        gas.selected_month.setDate(QDate(2026, 10, 1))
-        self.assertEqual(calls, [QDate(2026, 10, 1)])
+        gas.date_from.dateChanged.connect(calls.append)
+        date = gas.date_from.date().addDays(1)
+        gas.date_from.setDate(date)
+        gas.date_from.setDate(date)
+        self.assertEqual(calls, [date])
         gas.tabs.pivot.items["1"].click()
         self.assertEqual(gas.tabs.currentIndex(), 1)
         self.assertEqual(gas._display_scope, "trend")

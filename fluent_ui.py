@@ -10,7 +10,7 @@ from qfluentwidgets import (
     CalendarPicker, ScrollArea, FluentStyleSheet, setTheme, setThemeColor, setFontFamilies, Theme,
 )
 
-APP_VERSION = "3.11"
+APP_VERSION = "3.12"
 
 
 def configure_fluent(app):
@@ -163,7 +163,7 @@ class SettingsPage(ScrollArea):
         self.path_labels = {}
         for key, title, description in (
             ("root_dir", "Process Logs", "RecipeProcLog files for plotting and comparing runs"),
-            ("proc_log_dir", "Gas Usage Logs", "ProcLog files for calculating monthly N2 and O2 usage"),
+            ("proc_log_dir", "Gas Usage Logs", "ProcLog files for calculating N2 and O2 usage"),
             ("alarm_dir", "Alarm Logs", "Alarms recorded during process runs"),
             ("history_dir", "Run History", "Run history and statistics by date"),
         ):
