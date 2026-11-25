@@ -57,7 +57,7 @@ class GasUsageTests(unittest.TestCase):
         self.assertAlmostEqual(row["N2+O2 (ft³)"], 2)
         self.assertAlmostEqual(row["N2 recorded (h)"], 1 / 60)
         self.assertTrue(pd.isna(result.tubes.iloc[1]["N2 (ft³)"]))
-        self.assertEqual(result.tubes.iloc[1]["Status"], "기록 없음")
+        self.assertEqual(result.tubes.iloc[1]["Status"], "No data")
 
     def test_irregular_sampling_uses_trapezoids_not_row_count(self):
         self.write(log(["2026-01-01 00:00:00", "2026-01-01 00:00:15", "2026-01-01 00:01:00"],
@@ -104,7 +104,7 @@ class GasUsageTests(unittest.TestCase):
         result = self.result()
         self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 2)
         self.assertAlmostEqual(result.tubes.iloc[0]["O2 (ft³)"], 1.5)
-        self.assertTrue(result.issues["Issue"].str.contains("중복/겹침").any())
+        self.assertTrue(result.issues["Issue"].str.contains("duplicate or overlapping").any())
 
     def test_invalid_gas_endpoints_are_excluded_not_clamped_or_bridged(self):
         frame = log(pd.date_range("2026-01-01", periods=4, freq="1min").astype(str))
@@ -113,7 +113,7 @@ class GasUsageTests(unittest.TestCase):
         result = self.result()
         self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 1)
         self.assertAlmostEqual(result.tubes.iloc[0]["O2 (ft³)"], 3)
-        self.assertTrue(result.issues["Issue"].str.contains("음수").any())
+        self.assertTrue(result.issues["Issue"].str.contains("negative").any())
 
     def test_nan_infinity_and_missing_channel_are_unavailable_not_zero(self):
         frame = log(["2026-01-01 00:00:00", "2026-01-01 00:01:00"])
@@ -129,7 +129,7 @@ class GasUsageTests(unittest.TestCase):
         self.write(log(["2026-01-01 00:04:00", "2026-01-01 00:05:00"]), name="TUBE01_second.csv")
         limited = self.result(GasUsageConfig("2026-01", "2026-02", max_gap_seconds=60, filename_period=False))
         self.assertAlmostEqual(limited.tubes.iloc[0]["N2 (ft³)"], 1)
-        self.assertTrue(limited.issues["Issue"].str.contains("60초 초과").any())
+        self.assertTrue(limited.issues["Issue"].str.contains("exceeds 60 seconds").any())
 
     def test_same_duration_at_one_thirty_and_120_second_cadences(self):
         for interval in (1, 30, 120):
@@ -221,8 +221,8 @@ class GasUsageTests(unittest.TestCase):
         settings = result.settings.set_index("Setting")["Value"]
         self.assertEqual(settings["Skipped outside period"], 2)
         self.assertEqual(len(result.files), 1)
-        self.assertTrue(any("기록 기간 확인" in e[2] for e in events))
-        self.assertEqual([e[2] for e in events if "유량 집계" in e[2]], ["유량 집계 · TUBE01_run_20261001.csv"])
+        self.assertTrue(any("Checking recording dates" in e[2] for e in events))
+        self.assertEqual([e[2] for e in events if "Integrating flow" in e[2]], ["Integrating flow · TUBE01_run_20261001.csv"])
 
     def test_file_selection_uses_contents_and_keeps_cross_month_intervals(self):
         # Both the file name and the final row alone would exclude this file incorrectly.
@@ -230,7 +230,7 @@ class GasUsageTests(unittest.TestCase):
                    name="TUBE01_recipe_20260801.csv")
         result = self.result(GasUsageConfig("2026-10", "2026-10", filename_period=False))
         self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 1)
-        self.assertTrue(result.issues["Issue"].str.contains("역행").any())
+        self.assertTrue(result.issues["Issue"].str.contains("Backward timestamp").any())
         self.assertEqual(len(result.files), 1)
 
     def test_period_index_reuses_unchanged_files_and_rechecks_modified_files(self):
@@ -270,7 +270,7 @@ class GasUsageTests(unittest.TestCase):
         self.write(frame)
         result = self.result()
         self.assertFalse(result.files.empty)
-        self.assertTrue(result.issues["Issue"].str.contains("잘못되거나 누락된 시각").any())
+        self.assertTrue(result.issues["Issue"].str.contains("Invalid or missing timestamp").any())
 
     def test_streaming_keeps_boundary_pairs_and_bounds_chunk_memory(self):
         from gas_usage import flow_intervals
@@ -297,7 +297,7 @@ class GasUsageTests(unittest.TestCase):
             result = self.result()
         self.assertAlmostEqual(result.tubes.iloc[0]["N2 (ft³)"], 2)
         self.assertAlmostEqual(result.tubes.iloc[0]["O2 (ft³)"], 4)
-        bad = result.issues[result.issues["Issue"].str.contains("음수")]
+        bad = result.issues[result.issues["Issue"].str.contains("negative")]
         self.assertEqual(bad["Count"].sum(), 1)
 
     def test_late_tube_mismatch_discards_all_earlier_chunks(self):
@@ -361,7 +361,7 @@ class GasUsageTests(unittest.TestCase):
         stop = False
         def progress(done, total, name):
             nonlocal stop
-            if "겹친 구간 정리" in name:
+            if "Resolving overlaps" in name:
                 stop = True
         with self.assertRaises(CalculationCancelled):
             calculate_monthly_usage(self.root, self.config, progress, lambda: stop, temp_parent=scratch)
@@ -389,7 +389,7 @@ class GasUsageTests(unittest.TestCase):
             updated = calculate_monthly_usage(self.root, self.config, period_cache=cache)
         self.assertEqual({c.args[0].name for c in reader.call_args_list}, {"TUBE01_a.csv","TUBE01_copy.csv"})
         self.assertAlmostEqual(updated.monthly.iloc[0]["N2 (ft³)"], 2)
-        self.assertTrue(updated.issues["Issue"].str.contains("중복/겹침").any())
+        self.assertTrue(updated.issues["Issue"].str.contains("duplicate or overlapping").any())
         self.assertEqual(updated.settings.set_index("Setting").loc["Reused files","Value"], 1)
 
     def test_added_disjoint_file_reads_only_new_file_and_deletion_removes_its_usage(self):
@@ -476,7 +476,7 @@ class GasUsageTests(unittest.TestCase):
         self.assertEqual(settings["Prior-month boundary files"], 1)
         self.assertEqual(settings["Next-month boundary files"], 1)
         self.assertTrue(result.issues.empty)
-        self.assertTrue(any("파일명으로 대상 월 선별" in event[2] for event in events))
+        self.assertTrue(any("Selecting months by filename" in event[2] for event in events))
 
     def test_filename_discovery_uses_directory_entries_and_stats_only_selected_logs(self):
         import gas_usage_cache
@@ -599,7 +599,7 @@ class GasUsageTests(unittest.TestCase):
         with patch("gas_usage.read_flow_csv",side_effect=AssertionError("Unknown names must not be opened")):
             strict=calculate_monthly_usage(self.root,GasUsageConfig("2026-10","2026-10"))
         self.assertTrue(strict.files.empty)
-        self.assertTrue(strict.issues["Issue"].str.contains("파일명 형식 제외").all())
+        self.assertTrue(strict.issues["Issue"].str.contains("Filename excluded").all())
         legacy=calculate_monthly_usage(self.root,GasUsageConfig("2026-10","2026-10",filename_period=False))
         self.assertAlmostEqual(legacy.monthly.iloc[0]["N2 (ft³)"],1)
 
@@ -611,7 +611,7 @@ class GasUsageTests(unittest.TestCase):
             result=calculate_monthly_usage(self.root,GasUsageConfig("2026-10","2026-10"))
         self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"],1)
         self.assertEqual(len(result.files),2)
-        self.assertTrue(result.issues["Issue"].str.contains("8시간 기록 범위").any())
+        self.assertTrue(result.issues["Issue"].str.contains("8-hour window").any())
 
     def test_one_second_hmi_skew_with_variable_cadence_is_single_pass_without_file_gap(self):
         import gas_usage
@@ -688,7 +688,7 @@ class GasUsageTests(unittest.TestCase):
         with patch("gas_usage.DiskIntervalStore", side_effect=AssertionError("Unexpected disk sort")):
             result = calculate_monthly_usage(self.root, config)
         self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], 33 / 60)
-        self.assertEqual(result.issues.loc[result.issues.Issue.str.contains("1초로 가정"), "Count"].sum(), 2)
+        self.assertEqual(result.issues.loc[result.issues.Issue.str.contains("contributes one second"), "Count"].sum(), 2)
 
     def test_short_gaps_use_one_second_then_use_raw_elapsed_across_chunks(self):
         elapsed = np.array([0, 0, 1, 3, 6, 15, 25, 55, 115])  # Gaps: 0, 1, 2, 3, 9, 10, 30, 60
@@ -717,7 +717,7 @@ class GasUsageTests(unittest.TestCase):
         self.write(log(times.astype(str)), name="TUBE01_261001_0.csv")
         result = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-10", max_gap_seconds=2))
         self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], 3 / 60)
-        self.assertEqual(result.issues.loc[result.issues.Issue.str.contains("기록 간격"), "Count"].sum(), 1)
+        self.assertEqual(result.issues.loc[result.issues.Issue.str.contains("Recording gap"), "Count"].sum(), 1)
 
     def test_other_month_changes_keep_selected_month_cache_and_new_selected_file_is_read_once(self):
         from gas_usage import read_flow_csv
@@ -751,7 +751,7 @@ class GasUsageTests(unittest.TestCase):
             self.assertAlmostEqual(result.monthly.iloc[0]["O2 (ft³)"], 62 / 60)
             self.assertAlmostEqual(result.monthly.iloc[0]["N2 recorded (h)"], 62 / 3600)
             self.assertAlmostEqual(result.channels.query("Gas == 'N2'")["Volume (ft³)"].sum(), 7.65)
-            repeated = result.issues[result.issues.Issue.str.contains("1초로 가정")]
+            repeated = result.issues[result.issues.Issue.str.contains("contributes one second")]
             self.assertEqual(repeated.Count.sum(), 2)
 
     def test_repeated_samples_survive_disk_overlap_and_duplicate_file_copies(self):
@@ -762,7 +762,7 @@ class GasUsageTests(unittest.TestCase):
             result = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-10"))
         self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], 64 / 60)
         self.assertAlmostEqual(result.monthly.iloc[0]["N2 recorded (h)"], 64 / 3600)
-        self.assertTrue(result.issues.Issue.str.contains("동일 중복 시각 행").any())
+        self.assertTrue(result.issues.Issue.str.contains("identical repeated-timestamp rows").any())
 
     def test_only_equal_time_files_are_deduplicated_in_legacy_mode(self):
         for name in ("TUBE01_a.csv", "TUBE01_b.csv"):
@@ -791,7 +791,7 @@ class GasUsageTests(unittest.TestCase):
             with self.subTest(size=size), patch("gas_usage.CSV_CHUNK_ROWS", size):
                 result = self.result()
             self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], 2)
-            self.assertEqual(result.issues.loc[result.issues.Issue.str.contains("역행"), "Count"].sum(), 2)
+            self.assertEqual(result.issues.loc[result.issues.Issue.str.contains("Backward timestamp"), "Count"].sum(), 2)
 
     def test_outside_window_rows_do_not_discard_valid_rows_or_pollute_reverse_filter(self):
         frame = log(["2026-09-30 23:59:00", "2026-10-01 00:00:00", "2026-10-01 09:00:00",
@@ -804,14 +804,14 @@ class GasUsageTests(unittest.TestCase):
                 result = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-10"))
             self.assertAlmostEqual(result.monthly.iloc[0]["N2 (ft³)"], 4)
             self.assertEqual(len(result.files), 1)
-            self.assertEqual(result.issues.loc[result.issues.Issue.str.contains("8시간"), "Count"].sum(), 3)
-            self.assertFalse(result.issues.Issue.str.contains("역행").any())
+            self.assertEqual(result.issues.loc[result.issues.Issue.str.contains("8-hour"), "Count"].sum(), 3)
+            self.assertFalse(result.issues.Issue.str.contains("Backward timestamp").any())
 
     def test_all_outside_rows_produce_no_volume_and_explain_exclusion(self):
         self.write(log(["2026-10-01 09:00:00", "2026-10-01 09:01:00"]), name="TUBE01_261001_0.csv")
         result = calculate_monthly_usage(self.root, GasUsageConfig("2026-10", "2026-10"))
         self.assertTrue(result.monthly["N2 (ft³)"].isna().all())
-        self.assertEqual(result.issues.loc[result.issues.Issue.str.contains("8시간"), "Count"].sum(), 2)
+        self.assertEqual(result.issues.loc[result.issues.Issue.str.contains("8-hour"), "Count"].sum(), 2)
 
     def test_repeated_rows_are_assigned_to_timestamp_month_without_shifting_later_rows(self):
         self.write(log(["2026-01-31 23:59:59"] * 3 + ["2026-02-01 00:00:00"] * 2))
@@ -923,7 +923,7 @@ class GasUsageUiTests(unittest.TestCase):
                 try:
                     self.assertIsNone(dialog.worker)
                     self.assertIsNone(dialog.result)
-                    self.assertIn("취소", dialog.status.text())
+                    self.assertIn("cancelled", dialog.status.text())
                 finally:
                     if dialog.worker is not None:
                         dialog.worker.requestInterruption()

@@ -10,7 +10,7 @@ import time
 import pandas as pd
 
 # Bump when accounting or result semantics change.
-RESULT_CACHE_VERSION = "v3.09-1"
+RESULT_CACHE_VERSION = "v3.10-1"
 FRAME_NAMES = ("tubes", "monthly", "issues", "files", "settings", "channels")
 
 

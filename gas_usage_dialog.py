@@ -65,7 +65,7 @@ class GasUsageDialog(QDialog):
     def __init__(self, proc_log_dir, parent=None, settings=None, *, embedded=False):
         super().__init__(parent)
         self._embedded = embedded
-        self.setWindowTitle(f"가스 사용량 · {APP_VERSION}")
+        self.setWindowTitle(f"Gas Usage · {APP_VERSION}")
         if embedded:
             self.setWindowFlags(Qt.Widget)
         self.resize(1180, 1000)
@@ -91,11 +91,11 @@ class GasUsageDialog(QDialog):
         apply_shadow(banner, blur=12, y_offset=2, color=QColor(0, 0, 0, 16))
         header = QHBoxLayout(banner)
         header.setContentsMargins(20, 13, 20, 13)
-        title = QLabel("가스 사용량")
+        title = QLabel("Gas Usage")
         title.setStyleSheet("font-size:23px; font-weight:700; color:#243f54;")
         header.addWidget(title)
         header.addStretch()
-        header.addWidget(QLabel("집계 월"))
+        header.addWidget(QLabel("Month"))
         today = QDate.currentDate()
         self.selected_month = QDateEdit(QDate(today.year(), today.month(), 1))
         self.selected_month.setDisplayFormat("yyyy-MM")
@@ -110,61 +110,61 @@ class GasUsageDialog(QDialog):
         controls.setSpacing(6)
         toolbar = QHBoxLayout()
         toolbar.addStretch()
-        self.settings_toggle = QPushButton("경로 / 계산 설정")
+        self.settings_toggle = QPushButton("Path and Calculation Settings")
         self.settings_toggle.setCheckable(True)
         toolbar.addWidget(self.settings_toggle)
-        self.calculate_button = PrimaryPushButton(FIF.PLAY, "선택 월 집계")
+        self.calculate_button = PrimaryPushButton(FIF.PLAY, "Calculate Month")
         self.calculate_button.setProperty("primary", True)
         self.calculate_button.clicked.connect(self.start_calculation)
         toolbar.addWidget(self.calculate_button)
-        self.export_button = QPushButton("Excel 내보내기")
+        self.export_button = QPushButton("Export to Excel")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export)
         toolbar.addWidget(self.export_button)
         controls.addLayout(toolbar)
 
-        group = QGroupBox("가스 집계용 ProcLog 경로 및 실측 sccm 컬럼")
+        group = QGroupBox("ProcLog folder and measured flow columns (sccm)")
         group.setVisible(False)
         self.settings_toggle.toggled.connect(group.setVisible)
         form = QFormLayout(group)
         path_row = QHBoxLayout()
         self.root_edit = QLineEdit(str(proc_log_dir or ""))
-        self.root_edit.setToolTip("기본 경로는 메인 Settings의 Proc log dir (Gas usage)에서 저장합니다.")
+        self.root_edit.setToolTip("Set the default folder under Settings → Proc log dir (Gas usage).")
         path_row.addWidget(self.root_edit, 1)
-        browse = QPushButton("폴더 선택")
+        browse = QPushButton("Browse…")
         browse.clicked.connect(self.browse)
         path_row.addWidget(browse)
-        form.addRow("ProcLog 폴더", path_row)
-        self.filename_filter = QCheckBox("파일명으로 대상 월 선별 (TUBE##_YYMMDD_0/8/16.csv)")
+        form.addRow("ProcLog folder", path_row)
+        self.filename_filter = QCheckBox("Select months by filename (TUBE##_YYMMDD_0/8/16.csv)")
         self.filename_filter.setChecked(self.settings.value("filename_period", True, type=bool))
-        self.filename_filter.setToolTip("기본값: 선택 월과 앞뒤 월 경계 파일만 읽습니다.\n"
-                                       "파일 시작보다 최대 1초 빠른 기록을 허용하며 실제 시각으로 월을 나눕니다.\n"
-                                       "이름 형식이 다른 과거 로그는 해제하면 시간 컬럼으로 선별합니다.")
+        self.filename_filter.setToolTip("By default, only files for the selected months and adjacent boundary shifts are read.\n"
+                                       "Records up to one second before the named start are accepted. Actual timestamps determine the month.\n"
+                                       "Clear this option to use the time column for older logs with other filename formats.")
         form.addRow(self.filename_filter)
         self.n2_edit = QLineEdit(self.settings.value("n2", ", ".join(DEFAULT_N2), type=str))
         self.o2_edit = QLineEdit(self.settings.value("o2", ", ".join(DEFAULT_O2), type=str))
         for edit in (self.n2_edit, self.o2_edit):
-            edit.setToolTip("실측 sccm 컬럼 이름을 쉼표로 구분하세요. SP, 압력, Total 중복 합산을 피하세요.")
-        form.addRow("N2 실측 sccm", self.n2_edit)
-        form.addRow("O2 실측 sccm", self.o2_edit)
+            edit.setToolTip("Enter measured flow column names separated by commas. Exclude setpoints, pressure, and totals that would double-count flow.")
+        form.addRow("Measured N2 flow (sccm)", self.n2_edit)
+        form.addRow("Measured O2 flow (sccm)", self.o2_edit)
         extra = QHBoxLayout()
         self.time_edit = QLineEdit(self.settings.value("time", "Time", type=str))
         self.time_edit.setMaximumWidth(140)
-        extra.addWidget(QLabel("시간 컬럼"))
+        extra.addWidget(QLabel("Time column"))
         extra.addWidget(self.time_edit)
-        extra.addWidget(QLabel("기록 간격 상한 (선택)"))
+        extra.addWidget(QLabel("Maximum recording gap (optional)"))
         self.gap = QDoubleSpinBox()
         self.gap.setRange(0, 86400)
         self.gap.setDecimals(3)
         self.gap.setSuffix(" s")
-        self.gap.setSpecialValueText("제한 없음")
-        self.gap.setToolTip("앞뒤 시각 차이로 적산합니다. 간격 상한을 지정한 경우에만 더 긴 구간을 제외합니다.")
+        self.gap.setSpecialValueText("Unlimited")
+        self.gap.setToolTip("Flow is integrated between consecutive samples. Set a maximum gap to exclude longer intervals.")
         # v3.01 wrote a default 60-second cap under 'gap'. Do not carry that
         # implicit cap into interval-aware accounting; new explicit limits persist.
         self.gap.setValue(self.settings.value("gap_limit_seconds", 0.0, type=float))
         extra.addWidget(self.gap)
         extra.addStretch()
-        defaults = QPushButton("기본값 복원")
+        defaults = QPushButton("Restore Defaults")
         defaults.clicked.connect(self.restore_defaults)
         extra.addWidget(defaults)
         form.addRow(extra)
@@ -178,13 +178,13 @@ class GasUsageDialog(QDialog):
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         progress_row.addWidget(self.progress, 1)
-        self.cancel_button = QPushButton("집계 취소")
+        self.cancel_button = QPushButton("Cancel Calculation")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_calculation)
         progress_row.addWidget(self.cancel_button)
         layout.addWidget(self.progress_widget)
         self.progress_widget.hide()
-        self.status = QLabel("우측 상단의 월을 선택하고 선택 월 집계를 누르세요. 여러 달은 기간별 사용량 추이 탭에서 집계합니다.")
+        self.status = QLabel("Choose a month and click Calculate Month. For multiple months, use the Usage Trends tab.")
         self.status.setWordWrap(True)
         self.status.setStyleSheet("color:#526675; font-size:11px;")
         layout.addWidget(self.status)
@@ -193,7 +193,7 @@ class GasUsageDialog(QDialog):
         self._build_monthly_page()
         self._build_trend_page()
         self.tube_table, self.issues_table = (QTableWidget() for _ in range(2))
-        for title, table in (("Tube별 상세", self.tube_table), ("검토 내역", self.issues_table)):
+        for title, table in (("Tube Details", self.tube_table), ("Review Issues", self.issues_table)):
             table.setEditTriggers(QAbstractItemView.NoEditTriggers)
             table.setAlternatingRowColors(True)
             table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -201,7 +201,7 @@ class GasUsageDialog(QDialog):
             table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
             self.tabs.addTab(table, title)
         layout.addWidget(self.tabs, 1)
-        note = QLabel("단위 ft³ · 원본 sccm과 동일한 표준상태 · — = 유효 기록 없음 · 미기록 대기/퍼지 사용량 제외")
+        note = QLabel("Volumes are in ft³ at the same standard conditions as the source sccm. A dash indicates no valid data. Totals exclude unlogged idle and purge usage.")
         note.setStyleSheet("font-size:10px; color:#657582;")
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -257,7 +257,7 @@ class GasUsageDialog(QDialog):
             totals.addWidget(value, 1, Qt.AlignHCenter)
             self.monthly_totals[gas] = value
         layout.addWidget(footer)
-        self.tabs.addTab(page, "월별 Tube 현황")
+        self.tabs.addTab(page, "Monthly Tube Usage")
 
     def _build_trend_page(self):
         page = QWidget()
@@ -265,7 +265,7 @@ class GasUsageDialog(QDialog):
         self.trend_controls = QWidget()
         filters = QHBoxLayout(self.trend_controls)
         filters.setContentsMargins(0, 8, 0, 8)
-        filters.addWidget(QLabel("집계 기간"))
+        filters.addWidget(QLabel("Date range"))
         today = QDate.currentDate()
         self.month_from, self.month_to = QDateEdit(), QDateEdit()
         for edit, date in ((self.month_from, QDate(today.year(), 1, 1)),
@@ -277,18 +277,18 @@ class GasUsageDialog(QDialog):
         filters.addWidget(self.month_from)
         filters.addWidget(QLabel("~"))
         filters.addWidget(self.month_to)
-        self.trend_calculate_button = QPushButton("기간 집계")
+        self.trend_calculate_button = QPushButton("Calculate Range")
         self.trend_calculate_button.setProperty("primary", True)
         self.trend_calculate_button.clicked.connect(lambda: self.start_calculation(scope="trend"))
         filters.addWidget(self.trend_calculate_button)
         filters.addStretch()
         filters.addWidget(QLabel("Tube"))
         self.tube_filter = QComboBox()
-        self.tube_filter.addItem("모든 Tube", None)
+        self.tube_filter.addItem("All tubes", None)
         self.tube_filter.setMinimumWidth(130)
         filters.addWidget(self.tube_filter)
         layout.addWidget(self.trend_controls)
-        self.summary = QLabel("N2: —    O2: —    합계: —")
+        self.summary = QLabel("N2: —    O2: —    Total: —")
         self.summary.setStyleSheet("font-size:18px; font-weight:700; color:#176596; padding:8px;")
         layout.addWidget(self.summary)
         self.chart = QChart()
@@ -296,17 +296,17 @@ class GasUsageDialog(QDialog):
         self.chart.setBackgroundRoundness(18)
         self.chart.setBackgroundBrush(QColor("white"))
         self.chart.setDropShadowEnabled(True)
-        self.chart.setTitle("조회 기간 내 월별 N2 · O2 사용량 (ft³)")
+        self.chart.setTitle("Monthly N2 and O2 usage in the selected range (ft³)")
         self.chart_view = QChartView(self.chart)
         self.chart_view.setRenderHint(QPainter.Antialiasing)
         self.chart_view.setMinimumHeight(250)
         self.chart_view.setStyleSheet("background:transparent; border:0;")
         layout.addWidget(self.chart_view, 1)
-        note = QLabel("기간을 선택한 뒤 기간 집계를 누르세요. 월별 카드와 별도로 계산합니다. 그래프 * = 가스 기록 누락.")
+        note = QLabel("Select a date range and click Calculate Range. This calculation is separate from the monthly cards. An asterisk marks missing gas records.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#657582; font-size:11px;")
         layout.addWidget(note)
-        self.tabs.addTab(page, "기간별 사용량 추이")
+        self.tabs.addTab(page, "Usage Trends")
 
     def refresh_monthly(self, *_):
         month = self.selected_month.date().toString("yyyy-MM")
@@ -336,21 +336,21 @@ class GasUsageDialog(QDialog):
                 self.tube_cards[tube] = card
             self._card_signature = signature
         for tube, card in self.tube_cards.items():
-            values, totals, state = {}, {}, "기록 없음" if result is not None else "집계 대기"
+            values, totals, state = {}, {}, "No data" if result is not None else "Awaiting calculation"
             if not records.empty:
                 selected = records[records["Tube"] == tube]
                 for gas in ("N2", "O2"):
                     totals[gas] = selected[f"{gas} (ft³)"].sum(min_count=1)
                 if any(pd.notna(v) for v in totals.values()):
-                    state = "부분 집계" if (selected["Status"] != "기록 구간 집계").any() else "기록 구간 집계"
+                    state = "Partial coverage" if (selected["Status"] != "Recorded intervals").any() else "Recorded intervals"
             if not channels.empty:
                 values = channels[channels["Tube"] == tube].groupby("Channel")["Volume (ft³)"].sum(min_count=1).to_dict()
             card.set_usage(values, totals, state)
         for gas, label in self.monthly_totals.items():
             total = records[f"{gas} (ft³)"].sum(min_count=1) if not records.empty else float("nan")
             label.setText(volume_text(total))
-        hint = "선택 월의 기록된 사용량 · N2 / O2" if result is not None else "선택 월 집계를 눌러 사용량을 확인하세요"
-        self.month_caption.setText(f"{month}  |  전체 Tube  |  {hint}")
+        hint = "Recorded N2 and O2 usage for the selected month" if result is not None else "Click Calculate Month to see usage"
+        self.month_caption.setText(f"{month}  |  All tubes  |  {hint}")
 
     def restore_defaults(self):
         self.filename_filter.setChecked(True)
@@ -360,7 +360,7 @@ class GasUsageDialog(QDialog):
         self.gap.setValue(0)
 
     def browse(self):
-        path = QFileDialog.getExistingDirectory(self, "공정 로그 폴더", self.root_edit.text())
+        path = QFileDialog.getExistingDirectory(self, "Process Log Folder", self.root_edit.text())
         if path:
             self.root_edit.setText(path)
 
@@ -384,7 +384,7 @@ class GasUsageDialog(QDialog):
 
     def invalidate(self, *_):
         self.month_result = self.trend_result = None
-        self.status.setText("설정이 변경되었습니다. 선택 월 또는 기간 집계를 눌러 다시 계산하세요.")
+        self.status.setText("Settings changed. Click Calculate Month or Calculate Range to update the results.")
         self.refresh_monthly()
         self.refresh_views()
 
@@ -407,9 +407,9 @@ class GasUsageDialog(QDialog):
         try:
             config.validate()
             if not Path(self.root_edit.text().strip()).is_dir() or not self.root_edit.text().strip():
-                raise ValueError("공정 로그 폴더가 존재하지 않습니다.")
+                raise ValueError("The process log folder does not exist.")
         except ValueError as exc:
-            QMessageBox.warning(self, "월별 가스 사용량", str(exc))
+            QMessageBox.warning(self, "Monthly Gas Usage", str(exc))
             return
         self._calculation_scope = scope
         if scope == "month":
@@ -427,7 +427,7 @@ class GasUsageDialog(QDialog):
         self.progress.setRange(0, 0)
         self._active_period = (config.start_month if config.start_month == config.end_month
                                else f"{config.start_month} ~ {config.end_month}")
-        phase = "파일명으로 대상 로그를 찾습니다…" if config.filename_period else "대상 로그의 기록 기간을 확인합니다…"
+        phase = "Finding logs by filename…" if config.filename_period else "Checking log dates…"
         self.status.setText(f"{self._active_period} · {phase}")
         for key, value in (("n2", self.n2_edit.text()), ("o2", self.o2_edit.text()),
                            ("time", self.time_edit.text()), ("gap_limit_seconds", self.gap.value()),
@@ -437,20 +437,20 @@ class GasUsageDialog(QDialog):
         self.worker.progress.connect(self.update_progress)
         self.worker.succeeded.connect(self.show_result)
         self.worker.failed.connect(self.show_error)
-        self.worker.cancelled.connect(lambda: self.status.setText("집계를 취소했습니다. 결과는 저장되지 않았습니다."))
+        self.worker.cancelled.connect(lambda: self.status.setText("Calculation cancelled. No results were saved."))
         self.worker.finished.connect(self.worker_finished)
         self.worker.start(QThread.LowPriority)
 
     def update_progress(self, done, total, name):
         self.progress.setRange(0, max(total, 1))
         self.progress.setValue(done)
-        self.status.setText(f"{self._active_period} · {name} · {done:,} / {total:,} 파일")
+        self.status.setText(f"{self._active_period} · {name} · {done:,} / {total:,} files")
 
     def cancel_calculation(self):
         if self.worker is not None:
             self.worker.requestInterruption()
             self.cancel_button.setEnabled(False)
-            self.status.setText("현재 파일 처리를 마치고 취소합니다…")
+            self.status.setText("Cancelling after the current file…")
 
     def worker_finished(self):
         worker, self.worker = self.worker, None
@@ -467,7 +467,7 @@ class GasUsageDialog(QDialog):
             super().reject()
 
     def show_error(self, message):
-        self.status.setText(f"집계 실패: {message}")
+        self.status.setText(f"Calculation failed: {message}")
 
     def show_result(self, result):
         if self._calculation_scope == "trend":
@@ -476,7 +476,7 @@ class GasUsageDialog(QDialog):
             selected = combo.currentData()
             combo.blockSignals(True)
             combo.clear()
-            combo.addItem("모든 Tube", None)
+            combo.addItem("All tubes", None)
             for value in sorted(result.tubes["Tube"].unique()):
                 combo.addItem(value, value)
             combo.setCurrentIndex(max(0, combo.findData(selected)))
@@ -484,22 +484,22 @@ class GasUsageDialog(QDialog):
         else:
             self.month_result = result
         has_volume = result.tubes[VOLUME_COLUMNS[:2]].notna().any().any()
-        prefix = "집계 완료" if has_volume else "선택 기간에 집계 가능한 기록이 없습니다"
+        prefix = "Calculation complete" if has_volume else "No usable records in the selected range"
         values = result.settings.set_index("Setting")["Value"]
         skipped = int(values.get("Skipped outside period", 0))
         rejected = int(values.get("Rejected filename format", 0))
         boundary = (int(values.get("Prior-month boundary files", 0))
                     + int(values.get("Next-month boundary files", 0)))
         if boundary:
-            prefix += f" · 월 경계 확인 {boundary:,}개"
+            prefix += f" · Boundary files checked: {boundary:,}"
         if rejected:
-            prefix += f" · 파일명 형식 제외 {rejected:,}개"
+            prefix += f" · Filenames excluded: {rejected:,}"
         if str(values.get("Result cache", "")).startswith("Reused"):
-            prefix += " (변경 없음 · 결과 재사용)"
+            prefix += " (using cached results for unchanged logs)"
         period = values["Months"].split(" ~ ")
         label = period[0] if period[0] == period[1] else " ~ ".join(period)
-        self.status.setText(f"{label} · {prefix} · 집계 대상 파일 {len(result.files):,}개 · 기간 외 제외 {skipped:,}개 · 검토 {len(result.issues):,}개. "
-                            "검토 내역의 제외 구간과 누락 파일을 확인하세요.")
+        self.status.setText(f"{label} · {prefix} · Files selected: {len(result.files):,} · Outside range: {skipped:,} · Issues: {len(result.issues):,}. "
+                            "See Review Issues for excluded intervals and missing files.")
         self.refresh_monthly()
         self.refresh_views()
 
@@ -519,27 +519,27 @@ class GasUsageDialog(QDialog):
 
     def refresh_views(self, *_):
         self.result = self.monthly_source() if self._display_scope == "month" else self.trend_result
-        scope = "선택 월" if self._display_scope == "month" else "기간"
-        self.export_button.setText(f"{scope} Excel 내보내기")
+        scope = "Month" if self._display_scope == "month" else "Range"
+        self.export_button.setText(f"Export {scope} to Excel")
         self.export_button.setEnabled(self.result is not None and self.worker is None)
         if self.result is None:
             self.tube_table.setRowCount(0)
             self.issues_table.setRowCount(0)
-            self.tabs.setTabText(3, "검토 내역")
+            self.tabs.setTabText(3, "Review Issues")
         else:
             tubes = self.result.tubes
             if self._display_scope == "month":
                 tubes = tubes[tubes["Month"] == self.selected_month.date().toString("yyyy-MM")]
             self.fill_table(self.tube_table, tubes)
             self.fill_table(self.issues_table, self.result.issues)
-            self.tabs.setTabText(3, f"검토 내역 ({len(self.result.issues):,})")
+            self.tabs.setTabText(3, f"Review Issues ({len(self.result.issues):,})")
         self.chart.removeAllSeries()
         for axis in self.chart.axes():
             self.chart.removeAxis(axis)
             axis.deleteLater()
         if self.trend_result is None:
-            self.summary.setText("기간을 선택하고 기간 집계를 누르세요.")
-            self.chart.setTitle("기간 집계 후 월별 N2 · O2 사용량을 표시합니다")
+            self.summary.setText("Select a date range and click Calculate Range.")
+            self.chart.setTitle("Calculate a date range to see monthly N2 and O2 usage")
             return
         tube = self.tube_filter.currentData()
         tubes = self.trend_result.tubes
@@ -551,7 +551,7 @@ class GasUsageDialog(QDialog):
         total = totals.iloc[0] + totals.iloc[1]
         def display(value):
             return "—" if pd.isna(value) else f"{value:,.4f} ft³"
-        self.summary.setText(f"선택 기간 · N2: {display(totals.iloc[0])}    O2: {display(totals.iloc[1])}    합계: {display(total)}")
+        self.summary.setText(f"Selected range · N2: {display(totals.iloc[0])}    O2: {display(totals.iloc[1])}    Total: {display(total)}")
         series = QBarSeries()
         for gas, color in (("N2", "#0f6cbd"), ("O2", "#11877d")):
             bars = QBarSet(gas)
@@ -563,7 +563,7 @@ class GasUsageDialog(QDialog):
         labels = [m + ("*" if row.isna().any() else "")
                   for m, row in monthly.iterrows()]
         if not labels:
-            labels = ["기록 없음"]
+            labels = ["No data"]
         x.append(labels)
         if len(labels) > 8:
             x.setLabelsAngle(-30)
@@ -574,12 +574,12 @@ class GasUsageDialog(QDialog):
         self.chart.addAxis(y, Qt.AlignLeft)
         series.attachAxis(x)
         series.attachAxis(y)
-        self.chart.setTitle(f"{tube or '모든 Tube'} · 월별 기록 사용량")
+        self.chart.setTitle(f"{tube or 'All tubes'} · Monthly recorded usage")
 
     def export(self):
         if self.result is None:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "월별 가스 사용량 내보내기",
+        path, _ = QFileDialog.getSaveFileName(self, "Export Monthly Gas Usage",
             str(Path(self.root_edit.text()) / "monthly_gas_usage.xlsx"), "Excel (*.xlsx)")
         if not path:
             return
@@ -589,9 +589,9 @@ class GasUsageDialog(QDialog):
             export_gas_usage(select_usage_month(self.result, self.selected_month.date().toString("yyyy-MM"))
                              if self._display_scope == "month" else self.result, path)
         except Exception as exc:
-            QMessageBox.warning(self, "내보내기 실패", str(exc))
+            QMessageBox.warning(self, "Export Failed", str(exc))
             return
-        QMessageBox.information(self, "내보내기 완료", "선택한 집계 범위의 모든 Tube 결과와 계산 설정을 저장했습니다.")
+        QMessageBox.information(self, "Export Complete", "Saved results for all tubes in the selected range, along with the calculation settings.")
 
     def reject(self):
         if self._embedded:

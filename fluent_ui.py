@@ -10,7 +10,7 @@ from qfluentwidgets import (
     CalendarPicker, ScrollArea, FluentStyleSheet, setTheme, setThemeColor, setFontFamilies, Theme,
 )
 
-APP_VERSION = "3.09"
+APP_VERSION = "3.10"
 
 
 def configure_fluent(app):
@@ -158,14 +158,14 @@ class SettingsPage(ScrollArea):
         layout = QVBoxLayout(self.content)
         layout.setContentsMargins(28, 24, 28, 24)
         layout.setSpacing(16)
-        layout.addWidget(TitleLabel("설정", self))
-        layout.addWidget(BodyLabel("설비 로그 경로와 애플리케이션 정보", self))
+        layout.addWidget(TitleLabel("Settings", self))
+        layout.addWidget(BodyLabel("Equipment log paths and application information", self))
         self.path_labels = {}
         for key, title, description in (
-            ("root_dir", "공정 로그", "공정 그래프와 로그 비교에 사용하는 RecipeProcLog"),
-            ("proc_log_dir", "가스 집계 로그", "월별 N2 · O2 사용량을 계산하는 ProcLog"),
-            ("alarm_dir", "알람 로그", "공정 중 발생한 알람 기록"),
-            ("history_dir", "공정 이력", "날짜별 실행 이력과 통계"),
+            ("root_dir", "Process Logs", "RecipeProcLog files for plotting and comparing runs"),
+            ("proc_log_dir", "Gas Usage Logs", "ProcLog files for calculating monthly N2 and O2 usage"),
+            ("alarm_dir", "Alarm Logs", "Alarms recorded during process runs"),
+            ("history_dir", "Run History", "Run history and statistics by date"),
         ):
             card = CardWidget(self)
             row = QVBoxLayout(card)
@@ -178,7 +178,7 @@ class SettingsPage(ScrollArea):
             row.addWidget(value)
             self.path_labels[key] = value
             layout.addWidget(card)
-        self.edit_button = PrimaryPushButton("로그 경로 변경", self)
+        self.edit_button = PrimaryPushButton("Change Log Paths", self)
         self.edit_button.clicked.connect(edit_paths)
         layout.addWidget(self.edit_button, 0, Qt.AlignLeft)
         layout.addStretch()

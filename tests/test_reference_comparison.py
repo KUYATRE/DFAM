@@ -177,7 +177,7 @@ class ReferenceComparisonUiTests(unittest.TestCase):
             loaded = CsvPlotPanel._load_statistics_for_comparison(path)
             self.assertEqual(loaded.summary.iloc[0]["Step name"], "가열")
             data.drop(columns="Step No").to_csv(path, index=False)
-            with self.assertRaisesRegex(ValueError, "Step 번호"):
+            with self.assertRaisesRegex(ValueError, "step number"):
                 CsvPlotPanel._load_statistics_for_comparison(path)
 
     def test_panel_navigation_opens_comparison_above_statistics_dialog(self):

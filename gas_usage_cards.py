@@ -27,7 +27,7 @@ class TubeUsageCard(CardWidget):
         title = QLabel(re.sub(r"^TUBE", "TUBE ", tube))
         title.setStyleSheet("font-size:16px; font-weight:700; color:#243f54;")
         header.addWidget(title)
-        self.state = QLabel("기록 없음")
+        self.state = QLabel("No data")
         self.state.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.state.setStyleSheet("font-size:10px; color:#7c8996;")
         header.addWidget(self.state)

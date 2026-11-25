@@ -38,18 +38,18 @@ def _step_label(value):
 
 def calculate_step_statistics(df, time_col, step_col, name_col=None, sensor_cols=None):
     if df.empty:
-        raise ValueError("분석할 로그 데이터가 없습니다.")
+        raise ValueError("The log contains no data to analyze.")
     if step_col not in df.columns:
-        raise ValueError("Step 번호 컬럼을 찾을 수 없습니다.")
+        raise ValueError("The log has no step number column.")
     data = df.reset_index(drop=True)
     labels = data[step_col].map(_step_label)
     segments = labels.ne(labels.shift()).cumsum()
     notes = [
-        "전체 로그 기준입니다. 반복 Step은 연속 구간별로 회차를 구분합니다.",
-        "시간은 파일 기록 순서로 계산합니다. 다음 Step의 첫 기록을 전환 시점으로 사용하며, "
-        "마지막 Step은 마지막 기록까지만 계산합니다(완료 시간 아님).",
-        "평균은 유효 샘플의 산술평균, 표준편차는 표본 표준편차(n-1)입니다. "
-        "결측·비수치·무한대는 제외하며, 유효 샘플이 1개이면 표준편차는 비워 둡니다.",
+        "Statistics cover the full log. Each continuous run of a step counts as a separate occurrence.",
+        "Durations follow file order. Each step ends at the first sample of the next step. "
+        "The final step ends at its last recorded sample, so its duration may be partial.",
+        "Mean and sample standard deviation (n − 1) use finite numeric samples. "
+        "Standard deviation is blank for fewer than two valid samples.",
     ]
     times = pd.Series(pd.NaT, index=data.index, dtype="datetime64[ns]")
     if time_col in data.columns:
@@ -60,13 +60,13 @@ def calculate_step_statistics(df, time_col, step_col, name_col=None, sensor_cols
         if not numeric_time:
             times = pd.to_datetime(raw, errors="coerce", format="mixed")
     if times.isna().all():
-        notes.append("날짜/시간 컬럼을 해석할 수 없어 소요 시간을 계산하지 않았습니다. 숫자 축은 초로 가정하지 않습니다.")
+        notes.append("Durations are blank because the time column has no usable timestamps. Numeric axes have no assumed time unit.")
     elif times.isna().any():
-        notes.append(f"시각이 없거나 잘못된 기록 {int(times.isna().sum())}개: 해당 구간의 소요 시간은 비워 둡니다.")
+        notes.append(f"Missing or invalid timestamps in {int(times.isna().sum())} records. Durations are blank for affected segments.")
     if (times.diff().dt.total_seconds() < 0).any():
-        notes.append("시각이 역행하는 기록이 있습니다. 해당 구간의 소요 시간은 비워 둡니다.")
+        notes.append("Some timestamps go backward. Durations are blank for affected segments.")
     if labels.eq("(Unknown)").any():
-        notes.append("Step 번호가 없는 기록은 (Unknown) 구간으로 별도 표시합니다.")
+        notes.append("Records with a missing step number appear in segments labeled (Unknown).")
 
     excluded = {time_col, step_col, name_col, "_x"}
     candidates = data.columns if sensor_cols is None else sensor_cols
@@ -220,6 +220,6 @@ class StepStatisticsDialog(QDialog):
         try:
             export_step_statistics(self.result, path, self.source)
         except Exception as exc:
-            QMessageBox.critical(self, "Export failed", f"Excel 저장에 실패했습니다.\n{exc}")
+            QMessageBox.critical(self, "Export failed", f"Could not save the Excel workbook.\n{exc}")
             return
-        QMessageBox.information(self, "Export", f"저장했습니다.\n{path}")
+        QMessageBox.information(self, "Export", f"Workbook saved.\n{path}")

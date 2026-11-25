@@ -53,7 +53,7 @@ class DiskIntervalStore:
 
     def check_space(self):
         if shutil.disk_usage(self.directory.name).free < MIN_TEMP_FREE_BYTES:
-            raise RuntimeError("임시 저장 드라이브의 여유 공간이 1 GiB 미만이어서 집계를 중단합니다.")
+            raise RuntimeError("Calculation stopped because the temporary drive has less than 1 GiB of free space.")
 
     def begin_file(self):
         self.connection.execute("SAVEPOINT current_file")

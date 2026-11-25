@@ -108,13 +108,13 @@ def compare_step_statistics(reference: StepStatistics, target: StepStatistics):
                 sensor_rows.append([pair, step, occurrence, sensor, metric_status, statistic, rv, tv, delta, percent,
                                     r.get("Valid"), t.get("Valid"), r.get("Missing"), t.get("Missing")])
     notes = [
-        "사용자가 선택한 로그를 비교 기준으로 사용합니다. 정상·이상 판정은 수행하지 않습니다.",
-        "편차(Delta) = 분석 대상(Target) - 기준(Reference). 편차율 = 편차 / |기준값| × 100. 기준값이 0이면 편차율은 비워 둡니다.",
-        "Step 번호와 발생 회차, 센서 컬럼 이름으로 대응합니다. Step 번호 누락 또는 양쪽 Step 이름 불일치 시 편차를 계산하지 않습니다.",
-        "한쪽에만 있는 Step·센서는 별도 표시합니다. 결측 통계값은 0으로 대체하지 않습니다.",
-        "시간 계산 기준이 서로 다르면 시간 편차를 계산하지 않습니다. 마지막 Step끼리의 비교는 기록 구간 길이의 차이이며 완료 시간 차이가 아닙니다.",
-        "센서 편차는 각 Step의 전체 기록 통계값 차이입니다. 같은 경과 시각의 파형 차이 또는 같은 길이로 잘라낸 구간 비교가 아닙니다.",
-        "Recipe와 센서 단위가 같은 조건인지 확인하세요. 같은 Step 번호·회차만으로 동일한 공정 조건임을 판단할 수 없습니다.",
+        "The selected log is the reference for comparison. Results do not classify runs as normal or abnormal.",
+        "Delta = target − reference. Percent delta = delta / |reference| × 100. Percent delta is blank when the reference is zero.",
+        "Steps match by number and occurrence, and sensors by column name. Deltas are blank if the step number is missing or the step names differ.",
+        "Steps and sensors found in only one log are marked separately. Missing statistics stay blank.",
+        "Duration deltas are blank when the duration bases differ. For final steps, the delta compares recorded durations only.",
+        "Sensor deltas compare statistics over each full step. The comparison does not align waveforms by elapsed time or trim steps to equal lengths.",
+        "Verify that the recipes and sensor units match. Step numbers and occurrences alone do not establish equivalent process conditions.",
         "[Reference calculation notes]", *reference.notes, "[Target calculation notes]", *target.notes,
     ]
     return ReferenceComparison(pd.DataFrame(step_rows, columns=STEP_COLUMNS),
@@ -137,22 +137,22 @@ class ReferenceComparisonDialog(QDialog):
         self.setWindowTitle("Reference Comparison")
         self.resize(1200, 780)
         layout = QVBoxLayout(self)
-        target_label = QLabel(f"Target (분석 대상): {self.target_path}")
+        target_label = QLabel(f"Target: {self.target_path}")
         target_label.setWordWrap(True)
         layout.addWidget(target_label)
         row = QHBoxLayout()
-        self.reference_label = QLabel("Reference (기준): 비교할 기준 로그를 선택하세요.")
+        self.reference_label = QLabel("Reference: Select a log to compare.")
         self.reference_label.setWordWrap(True)
         row.addWidget(self.reference_label, 1)
         self.choose_button = QPushButton("Select reference CSV...")
         self.choose_button.clicked.connect(self.choose_reference)
         row.addWidget(self.choose_button)
         layout.addLayout(row)
-        description = QLabel("편차 = 분석 대상 - 기준 로그  |  편차율 = 편차 / |기준값| × 100 (기준값 0: 표시 안 함)\n"
-                             "Step 번호·발생 회차로 대응하며, 각 Step 전체의 통계값을 비교합니다. 정상·이상 판정은 하지 않습니다.")
+        description = QLabel("Delta = target − reference  |  Percent delta = delta / |reference| × 100 (blank for a zero reference)\n"
+                             "Steps match by number and occurrence. Statistics cover each full step and do not classify runs as normal or abnormal.")
         description.setWordWrap(True)
         layout.addWidget(description)
-        self.status = QLabel("기준 로그를 선택하면 Step별 시간과 센서 통계의 편차가 표시됩니다.")
+        self.status = QLabel("Select a reference log to see differences in step durations and sensor statistics.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         splitter = QSplitter(Qt.Vertical)
@@ -201,10 +201,10 @@ class ReferenceComparisonDialog(QDialog):
             reference = self.reference_loader(Path(path))
             result = compare_step_statistics(reference, self.target)
         except Exception as exc:
-            QMessageBox.critical(self, "Reference load failed", f"기준 로그를 읽을 수 없습니다.\n{exc}")
+            QMessageBox.critical(self, "Reference load failed", f"Could not read the reference log.\n{exc}")
             return False
         self.reference_path, self.result = Path(path), result
-        self.reference_label.setText(f"Reference (기준): {self.reference_path}")
+        self.reference_label.setText(f"Reference: {self.reference_path}")
         self.choose_button.setText("Change reference CSV...")
         self.steps_table.blockSignals(True)
         StepStatisticsDialog._fill(self.steps_table, result.steps.drop(
@@ -212,8 +212,8 @@ class ReferenceComparisonDialog(QDialog):
         self.steps_table.clearSelection()
         self.steps_table.blockSignals(False)
         count = int(result.steps["Match"].eq("Matched").sum())
-        self.status.setText(f"대응 Step: {count} / 표시 구간: {len(result.steps)}. "
-                            "Time comparison과 Match 열에서 누락·계산 조건 차이를 확인하세요.")
+        self.status.setText(f"Matched steps: {count} of {len(result.steps)} segments shown. "
+                            "See the Time comparison and Match columns for missing data or differences in calculation basis.")
         self.export_button.setEnabled(True)
         self.notes_button.setEnabled(True)
         if not result.steps.empty:
@@ -253,6 +253,6 @@ class ReferenceComparisonDialog(QDialog):
         try:
             export_reference_comparison(self.result, path, self.reference_path, self.target_path)
         except Exception as exc:
-            QMessageBox.critical(self, "Export failed", f"Excel 저장에 실패했습니다.\n{exc}")
+            QMessageBox.critical(self, "Export failed", f"Could not save the Excel workbook.\n{exc}")
             return
-        QMessageBox.information(self, "Export", f"저장했습니다.\n{path}")
+        QMessageBox.information(self, "Export", f"Workbook saved.\n{path}")

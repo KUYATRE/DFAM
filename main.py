@@ -134,7 +134,7 @@ class AppSettingsDialog(QDialog):
     def __init__(self, root_dir: str = "", alarm_dir: str = "", history_dir: str = "", parent=None,
                  *, proc_log_dir: str = DEFAULT_PROC_LOG_DIR):
         super().__init__(parent)
-        self.setWindowTitle("로그 경로 설정")
+        self.setWindowTitle("Log Path Settings")
         self.resize(860, 380)
 
         self.root_edit = QLineEdit(root_dir)
@@ -142,7 +142,7 @@ class AppSettingsDialog(QDialog):
         self.history_edit = QLineEdit(history_dir)
         self.proc_log_edit = QLineEdit(proc_log_dir)
         self.proc_log_edit.setPlaceholderText(DEFAULT_PROC_LOG_DIR)
-        self.proc_log_edit.setToolTip("월별 가스 사용량 집계 전용 폴더입니다. 집계할 때 폴더의 존재 여부를 확인합니다.")
+        self.proc_log_edit.setToolTip("Folder for monthly gas usage logs. The app checks this path when you run a calculation.")
 
         self.root_btn = QPushButton("Browse...")
         self.alarm_btn = QPushButton("Browse...")
@@ -183,7 +183,7 @@ class AppSettingsDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 20, 24, 20)
         lay.setSpacing(16)
-        lay.addWidget(TitleLabel("로그 경로 설정", self))
+        lay.addWidget(TitleLabel("Log Path Settings", self))
         lay.addLayout(form)
         lay.addWidget(btns)
 
@@ -202,25 +202,25 @@ class AppSettingsDialog(QDialog):
         proc_log_dir = self.proc_log_edit.text().strip()
 
         if not root_dir:
-            QMessageBox.warning(self, "Settings", "root_dir를 입력해줘.")
+            QMessageBox.warning(self, "Settings", "Enter the process log folder (root_dir).")
             return
         if not Path(root_dir).exists():
-            QMessageBox.warning(self, "Settings", "root_dir 경로가 존재하지 않아.")
+            QMessageBox.warning(self, "Settings", "The process log folder (root_dir) does not exist.")
             return
 
         if alarm_dir and not Path(alarm_dir).exists():
-            QMessageBox.warning(self, "Settings", "alarm_dir 경로가 존재하지 않아.")
+            QMessageBox.warning(self, "Settings", "The alarm log folder (alarm_dir) does not exist.")
             return
 
         if history_dir and not Path(history_dir).exists():
-            QMessageBox.warning(self, "Settings", "history_dir 경로가 존재하지 않아.")
+            QMessageBox.warning(self, "Settings", "The run history folder (history_dir) does not exist.")
             return
 
         if not proc_log_dir:
-            QMessageBox.warning(self, "Settings", "가스 집계용 Proc log dir를 입력하세요.")
+            QMessageBox.warning(self, "Settings", "Enter the ProcLog folder for gas usage.")
             return
         if Path(proc_log_dir).exists() and not Path(proc_log_dir).is_dir():
-            QMessageBox.warning(self, "Settings", "Proc log dir에는 파일이 아닌 폴더를 지정하세요.")
+            QMessageBox.warning(self, "Settings", "Select a folder for the ProcLog path.")
             return
 
         self.accept()
@@ -2274,7 +2274,7 @@ class CompareDialog(QDialog):
 
     def _on_accept(self):
         if not self.y_pick.selected_texts():
-            QMessageBox.information(self, "Compare", "비교할 Y 컬럼을 최소 1개 선택해줘.")
+            QMessageBox.information(self, "Compare", "Select at least one Y-axis column to compare.")
             return
         self.accept()
 
@@ -2427,7 +2427,7 @@ class CsvPlotPanel(QWidget):
         title_row.setContentsMargins(10, 2, 2, 6)
         title_row.setSpacing(8)
 
-        self.title = QLabel("왼쪽에서 CSV 로그를 선택하세요")
+        self.title = QLabel("Select a CSV log from the file tree")
         self.title.setWordWrap(True)
         self.title.setStyleSheet("font-weight:600; font-size:14px; color:#202020; padding:4px;")
         root.addWidget(self.title)
@@ -2447,19 +2447,19 @@ class CsvPlotPanel(QWidget):
         title_row.addWidget(self.btn_history, 0)
 
         self.btn_gas_usage = QPushButton("Monthly Gas Usage")
-        self.btn_gas_usage.setToolTip("Tube별 / 설비 전체 월별 N2·O2 사용량 (ft³)")
+        self.btn_gas_usage.setToolTip("Monthly N2 and O2 usage by tube and across all tubes (ft³)")
         self.btn_gas_usage.clicked.connect(self.show_gas_usage)
         self.btn_gas_usage.setStyleSheet(toolbar_btn_css)
         title_row.addWidget(self.btn_gas_usage, 0)
 
-        self.btn_step_stats = QPushButton("Step 통계")
+        self.btn_step_stats = QPushButton("Step Statistics")
         self.btn_step_stats.setEnabled(False)
         self.btn_step_stats.setToolTip("Show step durations and sensor statistics for the loaded CSV")
         self.btn_step_stats.clicked.connect(self.show_step_statistics)
         self.btn_step_stats.setStyleSheet(toolbar_btn_css)
         title_row.addWidget(self.btn_step_stats, 0)
 
-        self.btn_reset_zoom = QPushButton("확대 초기화")
+        self.btn_reset_zoom = QPushButton("Reset Zoom")
         self.btn_reset_zoom.setEnabled(False)
         self.btn_reset_zoom.setToolTip("Reset Zoom (X Axis) to full scale")
         self.btn_reset_zoom.clicked.connect(self.reset_zoom)
@@ -2467,7 +2467,7 @@ class CsvPlotPanel(QWidget):
         apply_shadow(self.btn_reset_zoom, blur=18, y_offset=3)
         title_row.addWidget(self.btn_reset_zoom, 0)
 
-        self.btn_add_graph = PrimaryPushButton(FIF.ADD, "그래프 추가")
+        self.btn_add_graph = PrimaryPushButton(FIF.ADD, "Add Graph")
         self.btn_add_graph.setEnabled(False)
         self.btn_add_graph.setToolTip("Add one more graph")
         self.btn_add_graph.clicked.connect(self.add_graph)
@@ -2495,7 +2495,7 @@ class CsvPlotPanel(QWidget):
         self.btn_clear_left.clicked.connect(self.clear_left)
         top.addWidget(self.btn_clear_left)
 
-        self.plot_btn = PrimaryPushButton("그래프 표시")
+        self.plot_btn = PrimaryPushButton("Plot")
         self.plot_btn.setEnabled(False)
         self.plot_btn.clicked.connect(self.plot)
         top.addWidget(self.plot_btn)
@@ -2685,11 +2685,11 @@ class CsvPlotPanel(QWidget):
         df, _ = CsvPlotPanel.read_csv_with_fallback(path)
         df = CsvPlotPanel._normalize_columns(df)
         if df.empty:
-            raise ValueError('분석할 로그 데이터가 없습니다.')
+            raise ValueError('The log contains no data to analyze.')
         step_col = CsvPlotPanel._detect_step_no_column_in_df(df)
         name_col = CsvPlotPanel._detect_step_name_column_in_df(df)
         if step_col is None or step_col == name_col:
-            raise ValueError('기준 로그에서 Step 번호 컬럼을 찾을 수 없습니다.')
+            raise ValueError('The reference log has no step number column.')
         return calculate_step_statistics(df, df.columns[0], step_col, name_col)
 
     def show_reference_comparison(self, target_statistics, parent=None):
@@ -3424,8 +3424,8 @@ class CsvPlotPanel(QWidget):
             QMessageBox.critical(
                 self,
                 "CSV file load aborted",
-                "파일을 읽을 수 없습니다.\n\n"
-                "UTF-8, UTF-8-SIG, CP949, EUC-KR 순으로 읽기를 시도했지만 실패했습니다.\n\n"
+                "Could not read the file.\n\n"
+                "Tried UTF-8, UTF-8-SIG, CP949, and EUC-KR.\n\n"
                 f"{e}"
             )
             return
@@ -4150,8 +4150,8 @@ class CsvPlotPanel(QWidget):
             area.update_reference_lines()
 
         self.status.setText(
-            f"표시 중: {len(df)} rows | Graphs={len(self._areas)} | "
-            f"(ResetZoom=전체복귀 · X click=range · X drag=zoom(>=2s) · Y band=scale)"
+            f"Showing {len(df)} rows | Graphs: {len(self._areas)} | "
+            f"Reset Zoom for full view · Click X axis to set range · Drag X axis to zoom (≥2 s) · Click Y band to set scale"
         )
 
 
@@ -4194,7 +4194,7 @@ class MainWindow(FluentWindow):
         self.proxy_model.setSourceModel(self.model)
 
         self.tree_search = QLineEdit()
-        self.tree_search.setPlaceholderText("파일 / 폴더 검색")
+        self.tree_search.setPlaceholderText("Search files and folders")
         self.tree_search.setClearButtonEnabled(True)
         self.tree_search.textChanged.connect(self.on_tree_search_changed)
         self.tree_search.setStyleSheet(
@@ -4287,20 +4287,20 @@ class MainWindow(FluentWindow):
         page_layout.setContentsMargins(20, 20, 20, 12)
         page_layout.setSpacing(12)
         heading = QHBoxLayout()
-        heading.addWidget(TitleLabel("공정 로그", self.workspace))
+        heading.addWidget(TitleLabel("Process Logs", self.workspace))
         heading.addStretch()
         heading.addWidget(CaptionLabel("PROCESS ANALYTICS", self.workspace))
         page_layout.addLayout(heading)
         page_layout.addWidget(splitter, 1)
-        self.addSubInterface(self.workspace, FIF.DOCUMENT, "공정 로그")
+        self.addSubInterface(self.workspace, FIF.DOCUMENT, "Process Logs")
 
         self.gas_page = GasUsageDialog(self.proc_log_dir, self, embedded=True)
         self.gas_page.setObjectName("gasUsageDialog")
-        self.addSubInterface(self.gas_page, FIF.IOT, "가스 사용량")
+        self.addSubInterface(self.gas_page, FIF.IOT, "Gas Usage")
         self.settings_page = SettingsPage(self.open_settings_dialog, self)
         self.settings_page.refresh_paths(self)
-        self.addSubInterface(self.settings_page, FIF.SETTING, "설정", NavigationItemPosition.BOTTOM)
-        self.navigationInterface.addItem("history", FIF.HISTORY, "공정 이력",
+        self.addSubInterface(self.settings_page, FIF.SETTING, "Settings", NavigationItemPosition.BOTTOM)
+        self.navigationInterface.addItem("history", FIF.HISTORY, "Run History",
                                          onClick=self.plot_panel.show_history_dialog, selectable=False)
         self.setMinimumSize(1000, 680)
         self.navigationInterface.setMinimumExpandWidth(850)
@@ -4373,7 +4373,7 @@ class MainWindow(FluentWindow):
 
     def open_settings_dialog(self):
         if self.gas_page.worker is not None:
-            QMessageBox.information(self, "집계 진행 중", "가스 집계를 완료하거나 취소한 뒤 로그 경로를 변경하세요.")
+            QMessageBox.information(self, "Calculation in Progress", "Wait for the gas usage calculation to finish or cancel it before changing log paths.")
             return
         dlg = AppSettingsDialog(
             root_dir=str(self.root_dir),
