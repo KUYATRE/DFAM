@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='LogPlotter_v3.10',
+    name='LogPlotter_v3.11',
     icon='icons/LP_icon_big.ico',
     debug=False,
     bootloader_ignore_signals=False,

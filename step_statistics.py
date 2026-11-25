@@ -183,7 +183,8 @@ class StepStatisticsDialog(QDialog):
         table.setAlternatingRowColors(True)
         table.setWordWrap(False)
         table.verticalHeader().hide()
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        # Keep cell updates cheap. _fill fits the columns after the batch is complete.
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         return table
 
     @staticmethod
@@ -197,6 +198,7 @@ class StepStatisticsDialog(QDialog):
                 item = QTableWidgetItem(text)
                 item.setToolTip("" if pd.isna(value) else str(value))
                 table.setItem(row, col, item)
+        table.resizeColumnsToContents()
 
     def refresh_sensors(self):
         row = self.steps_table.currentRow()

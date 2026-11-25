@@ -113,6 +113,29 @@ class StepStatisticsUiTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_step_switch_measures_cells_in_a_batch(self):
+        data = sample_log()
+        for index in range(8):
+            data[f"Temperature sensor on channel {index}"] = data["Temperature"]
+        result = calculate_step_statistics(data, "Time", "Step No", "Step Name")
+        dialog = StepStatisticsDialog(result, Path("sample.csv"))
+        try:
+            dialog.show()
+            self.app.processEvents()
+            table = dialog.sensors_table
+            delegate = table.itemDelegate()
+            with patch.object(delegate, "sizeHint", wraps=delegate.sizeHint) as measure:
+                dialog.steps_table.selectRow(2)
+                self.app.processEvents()
+            cells = table.rowCount() * table.columnCount()
+            # Allow an extra layout pass, but not a full scan per replaced cell.
+            self.assertLessEqual(measure.call_count, 2 * cells)
+            self.assertEqual(table.item(table.rowCount() - 1, 3).text(), "32")
+            self.assertGreaterEqual(table.columnWidth(0), table.sizeHintForColumn(0))
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+
     def test_step_selection_sensor_search_and_export(self):
         result = calculate_step_statistics(sample_log(), "Time", "Step No", "Step Name")
         dialog = StepStatisticsDialog(result, Path("sample.csv"))
