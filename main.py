@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 import re
 from dataclasses import dataclass
+from threading import Event
 
 import pandas as pd
 from ui_theme import apply_chrome_input_styles, apply_shadow
@@ -15,7 +16,7 @@ from PySide6.QtGui import (
 from PySide6.QtCore import (
     Qt, QDir, QDateTime, QPoint, QPointF, QRect, QRectF,
     QMargins, QTimer, Signal, QSize, QDate, QSortFilterProxyModel,
-    QSettings
+    QSettings, QAbstractTableModel, QModelIndex, QObject, QRunnable, QThreadPool, Slot
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
@@ -39,7 +40,7 @@ from PySide6.QtCharts import (
 from qfluentwidgets import (FluentWindow, FluentIcon as FIF, NavigationItemPosition,
     PushButton as QPushButton, PrimaryPushButton, LineEdit as QLineEdit,
     CheckBox as QCheckBox, TableWidget as QTableWidget, TreeView as QTreeView,
-    ListWidget as QListWidget, DateTimeEdit as QDateTimeEdit, DoubleSpinBox as QDoubleSpinBox,
+    ListWidget as QListWidget, TableView, DateTimeEdit as QDateTimeEdit, DoubleSpinBox as QDoubleSpinBox,
     TitleLabel, CaptionLabel, CardWidget, TransparentToolButton, DropDownToolButton, RoundMenu)
 from fluent_ui import FluentLineEdit as QLineEdit
 from fluent_ui import (FluentComboBox as QComboBox, FluentDateEdit as QDateEdit,
@@ -323,8 +324,8 @@ def scan_logs(root_dir: Path) -> pd.DataFrame:
 def parse_history_log_filename(p: Path) -> tuple[str, str, str, bool] | None:
     """
     history_dir 구조:
-      history_dir / TUBE01 / (레시피명)_(날짜)_(시간).csv
-      history_dir / TUBE01 / (레시피명)_(날짜)_(시간)_AB.csv
+      history_dir / (튜브 폴더명) / (레시피명)_(날짜)_(시간)[_AB].csv
+      튜브 폴더명 예: TUBE01, RPCVD1-1, ARCVD8-3
 
     return:
       recipe_from_filename, date_str, time_str, is_abort
@@ -408,6 +409,8 @@ def scan_history_logs(
     history_dir: Path,
     start_date: pd.Timestamp | None = None,
     end_date: pd.Timestamp | None = None,
+    *,
+    cancelled: Event | None = None,
 ) -> pd.DataFrame:
     """
     history_dir 하위 로그를 읽어서 raw/history DataFrame 생성.
@@ -425,10 +428,12 @@ def scan_history_logs(
     if not history_dir.exists():
         return pd.DataFrame()
 
-    start_norm = pd.Timestamp(start_date).normalize() if start_date is not None else None
-    end_norm = pd.Timestamp(end_date).normalize() if end_date is not None else None
+    start_key = pd.Timestamp(start_date).strftime("%Y%m%d") if start_date is not None else None
+    end_key = pd.Timestamp(end_date).strftime("%Y%m%d") if end_date is not None else None
 
     for p in history_dir.rglob("*.csv"):
+        if cancelled is not None and cancelled.is_set():
+            return pd.DataFrame()
         parsed = parse_history_log_filename(p)
         if parsed is None:
             continue
@@ -436,22 +441,10 @@ def scan_history_logs(
         recipe_from_filename, date_str, time_str, is_abort = parsed
         tube = p.parent.name.strip()
 
-        # ---------- 날짜 범위 선필터 ----------
-        try:
-            file_date = pd.to_datetime(date_str, format="%Y%m%d", errors="coerce")
-        except Exception:
-            file_date = pd.NaT
-
-        if pd.isna(file_date):
+        if start_key is not None and date_str < start_key:
             continue
-
-        file_date = pd.Timestamp(file_date).normalize()
-
-        if start_norm is not None and file_date < start_norm:
+        if end_key is not None and date_str > end_key:
             continue
-        if end_norm is not None and file_date > end_norm:
-            continue
-        # ------------------------------------
 
         dt = None
         try:
@@ -484,7 +477,8 @@ def scan_history_logs(
             "is_abort": bool(is_abort),
             "abort_flag": 1 if is_abort else 0,
         }
-        row.update(meta_cols)
+        for column, value in meta_cols.items():
+            row.setdefault(column, value)
         rows.append(row)
 
     df = pd.DataFrame(rows)
@@ -1703,6 +1697,60 @@ class HistoryChartView(QChartView):
         super().leaveEvent(e)
 
 
+class HistoryScan(QObject):
+    completed = Signal(object, object, str)
+
+    def __init__(self, directory, start, end):
+        super().__init__()
+        self.directory = directory
+        self.start_date = start
+        self.end_date = end
+        self.cancelled = Event()
+
+    def run(self):
+        try:
+            if self.cancelled.is_set():
+                return
+            if not self.directory.is_dir():
+                raise OSError(f"History folder is unavailable: {self.directory}")
+            logs = scan_history_logs(self.directory, self.start_date, self.end_date,
+                                     cancelled=self.cancelled)
+            error = ""
+        except Exception as exc:
+            logger.exception("Run History scan failed")
+            logs, error = pd.DataFrame(), str(exc)
+        if not self.cancelled.is_set():
+            self.completed.emit(self.cancelled, logs, error)
+
+
+class HistoryTableModel(QAbstractTableModel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.frame = pd.DataFrame()
+
+    def set_frame(self, frame):
+        self.beginResetModel()
+        self.frame = frame
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.frame)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.frame.columns)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole and index.isValid():
+            value = self.frame.iat[index.row(), index.column()]
+            return "" if pd.isna(value) else str(value)
+        return None
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+            return str(self.frame.columns[section])
+        return super().headerData(section, orientation, role)
+
+
 class HistoryDialog(QDialog):
     """
     날짜별 공정 횟수 표시
@@ -1721,6 +1769,7 @@ class HistoryDialog(QDialog):
 
         self.history_dir = Path(history_dir)
         self.df_logs = pd.DataFrame()
+        self._scan = None
 
         self.group_by = MenuSelectButton("Group")
         self.group_by.addItem("Total")
@@ -1756,6 +1805,7 @@ class HistoryDialog(QDialog):
 
         self.abort_only_cb = QCheckBox("Abort only")
         self.abort_only_cb.toggled.connect(lambda _: self._rebuild_chart())
+        self.abort_only_cb.toggled.connect(self._refresh_raw_table)
 
         if not self.df_logs.empty and "date_dt" in self.df_logs.columns:
             dmax = pd.to_datetime(self.df_logs["date_dt"].max()).date()
@@ -1808,9 +1858,9 @@ class HistoryDialog(QDialog):
         self.pie_view.setStyleSheet("background:white; border:1px solid #dde3ec; border-radius:16px;")
         apply_shadow(self.pie_view, blur=24, y_offset=4)
 
-        self.raw_table = QTableWidget()
-        self.raw_table.setColumnCount(0)
-        self.raw_table.setRowCount(0)
+        self.raw_table = TableView()
+        self.raw_model = HistoryTableModel(self.raw_table)
+        self.raw_table.setModel(self.raw_model)
         self.raw_table.setAlternatingRowColors(True)
         self.raw_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.raw_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1819,6 +1869,7 @@ class HistoryDialog(QDialog):
         self.raw_table.verticalHeader().setVisible(False)
         self.raw_table.horizontalHeader().setStretchLastSection(False)
         self.raw_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.raw_table.horizontalHeader().setResizeContentsPrecision(24)
         charts_row = QHBoxLayout()
         charts_row.setContentsMargins(0, 0, 0, 0)
         charts_row.setSpacing(12)
@@ -1936,12 +1987,10 @@ class HistoryDialog(QDialog):
         return out
 
     def _refresh_raw_table(self):
-        df = self.filtered_logs().copy()
+        df = self.filtered_logs()
 
-        if df is None or df.empty:
-            self.raw_table.clear()
-            self.raw_table.setRowCount(0)
-            self.raw_table.setColumnCount(0)
+        if df.empty:
+            self.raw_model.set_frame(pd.DataFrame())
             return
 
         preferred_front = ["date", "time", "tube", "job_id", "recipe", "recipe_from_filename"]
@@ -1952,42 +2001,43 @@ class HistoryDialog(QDialog):
         cols_mid = [c for c in df.columns if c not in cols_front + cols_back]
 
         cols = cols_front + cols_mid + cols_back
-        df = df.loc[:, cols].copy()
-
-        df = df.fillna("")
-
-        self.raw_table.clear()
-        self.raw_table.setColumnCount(len(cols))
-        self.raw_table.setRowCount(len(df))
-        self.raw_table.setHorizontalHeaderLabels([str(c) for c in cols])
-
-        for r in range(len(df)):
-            row = df.iloc[r]
-            for c, col_name in enumerate(cols):
-                val = row[col_name]
-                text = "" if pd.isna(val) else str(val)
-                item = QTableWidgetItem(text)
-                self.raw_table.setItem(r, c, item)
-
-        self.raw_table.resizeColumnsToContents()
-
+        self.raw_model.set_frame(df.loc[:, cols])
         hdr = self.raw_table.horizontalHeader()
         for i, col_name in enumerate(cols):
-            if col_name in ("path", "recipe_from_filename", "recipe"):
-                hdr.setSectionResizeMode(i, QHeaderView.Stretch)
+            stretch = col_name in ("path", "recipe_from_filename", "recipe")
+            hdr.setSectionResizeMode(i, QHeaderView.Stretch if stretch else QHeaderView.ResizeToContents)
 
     def reload_data(self):
+        if self._scan is not None:
+            self._scan.cancelled.set()
         start, end = self._selected_date_range()
+        self._scan = HistoryScan(self.history_dir, start, end)
+        self._scan.completed.connect(self._scan_completed, Qt.QueuedConnection)
+        self.df_logs = pd.DataFrame()
+        self._refresh_raw_table()
+        self._rebuild_chart()
+        self.btn_export.setEnabled(False)
+        QThreadPool.globalInstance().start(QRunnable.create(self._scan.run))
 
-        self.df_logs = scan_history_logs(
-            self.history_dir,
-            start_date=start,
-            end_date=end,
-        )
-
+    @Slot(object, object, str)
+    def _scan_completed(self, token, logs, error):
+        if self._scan is None or token is not self._scan.cancelled:
+            return
+        self._scan = None
+        self.df_logs = logs
         self._rebuild_group_candidates()
         self._rebuild_chart()
         self._refresh_raw_table()
+        self.btn_export.setEnabled(not logs.empty)
+        if error:
+            self.chart.setTitle("Could not load run history")
+            QMessageBox.warning(self, "Run History", error)
+
+    def done(self, result):
+        if self._scan is not None:
+            self._scan.cancelled.set()
+            self._scan = None
+        super().done(result)
 
     def _rebuild_group_candidates(self):
         current = self.group_by.currentText() if hasattr(self, "group_by") else "Total"
@@ -2142,7 +2192,8 @@ class HistoryDialog(QDialog):
 
         dates, groups, data = self._make_pivot()
         if not dates:
-            self.chart.setTitle("No logs found")
+            self.chart.setTitle("Loading run history…" if self._scan is not None else "No logs found")
+            self._rebuild_pie_chart()
             return
 
         mode = self.group_by.currentText()
@@ -2725,8 +2776,8 @@ class CsvPlotPanel(QWidget):
         return dfh
 
     def show_history_dialog(self, area: PlotArea | None = None):
-        if self.history_dir is None or not Path(self.history_dir).exists():
-            QMessageBox.information(self, "History", "history_dir is not set or does not exist.")
+        if self.history_dir is None:
+            QMessageBox.information(self, "History", "history_dir is not set.")
             return
 
         dlg = HistoryDialog(Path(self.history_dir), parent=self)
@@ -2736,6 +2787,7 @@ class CsvPlotPanel(QWidget):
 
         dlg.btn_export.clicked.connect(_export_from_dialog)
         dlg.exec()
+        dlg.deleteLater()
 
     def export_history_to_excel(self, dfh: pd.DataFrame | None = None):
         if dfh is None:
